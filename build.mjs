@@ -66,6 +66,33 @@ async function main() {
     platform: 'node',
   });
 
+  // S2 deterministic core as ESM for Node unit tests + the null-ACT dry run.
+  const nodeModules = [
+    ['src/shared/contract.ts', 'contract.mjs'],
+    ['src/plan/ir.ts', 'plan-ir.mjs'],
+    ['src/plan/compiler.ts', 'plan-compiler.mjs'],
+    ['src/verify/verify.ts', 'verify.mjs'],
+    ['src/engine/state-machine.ts', 'state-machine.mjs'],
+  ];
+  for (const [entry, out] of nodeModules) {
+    await build({
+      ...common,
+      entryPoints: [join(root, entry)],
+      outfile: join(dist, out),
+      format: 'esm',
+      platform: 'node',
+    });
+  }
+
+  // Null-ACT dry-run script (compiles the real IR, prints the linear plan).
+  await build({
+    ...common,
+    entryPoints: [join(root, 'test/dry-run.ts')],
+    outfile: join(dist, 'test/dry-run.mjs'),
+    format: 'esm',
+    platform: 'node',
+  });
+
   // Static assets.
   cpSync(join(root, 'manifest.json'), join(dist, 'manifest.json'));
   cpSync(join(root, 'sidepanel.html'), join(dist, 'sidepanel.html'));
