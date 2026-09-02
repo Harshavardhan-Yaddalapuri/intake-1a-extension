@@ -1,0 +1,18 @@
+{
+  "name": "intake-1a-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Chrome MV3 extension agent that builds a clinical study in an unknown eSource form designer via accessibility-tree perception and a human gate.",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.2.8",
+    "esbuild": "^0.24.0",
+    "jsdom": "^25.0.0",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Generic Contact Form</title>
+  </head>
+  <body>
+    <header>
+      <nav aria-label="Primary">
+        <a href="/home">Home</a>
+        <a href="/about">About</a>
+        <a href="/contact">Contact</a>
+      </nav>
+    </header>
+    <main>
+      <h1>Contact Us</h1>
+      <form>
+        <label for="full-name">Full Name</label>
+        <input id="full-name" type="text" />
+
+        <label for="email">Email Address</label>
+        <input id="email" type="email" />
+
+        <label for="topic">Topic</label>
+        <select id="topic">
+          <option>General</option>
+          <option>Billing</option>
+          <option>Support</option>
+        </select>
+
+        <label for="message">Message</label>
+        <textarea id="message" rows="4"></textarea>
+
+        <label><input type="checkbox" /> Subscribe to newsletter</label>
+
+        <button type="submit">Send Message</button>
+        <button type="button">Cancel</button>
+      </form>
+    </main>
+    <footer>
+      <a href="/privacy">Privacy Policy</a>
+    </footer>
+  </body>
+</html>
