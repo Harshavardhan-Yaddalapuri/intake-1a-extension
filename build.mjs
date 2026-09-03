@@ -33,10 +33,10 @@ async function main() {
     format: 'iife',
   });
 
-  // Side panel (human gate UI lands in S4).
+  // Side panel (human gate UI).
   await build({
     ...common,
-    entryPoints: [join(root, 'src/sidepanel.ts')],
+    entryPoints: [join(root, 'src/sidepanel/app.ts')],
     outfile: join(dist, 'sidepanel.js'),
     format: 'iife',
   });
@@ -73,6 +73,16 @@ async function main() {
     ['src/plan/compiler.ts', 'plan-compiler.mjs'],
     ['src/verify/verify.ts', 'verify.mjs'],
     ['src/engine/state-machine.ts', 'state-machine.mjs'],
+    // S3 modules.
+    ['src/act/primitives.ts', 'act-primitives.mjs'],
+    ['src/bind/cache.ts', 'bind-cache.mjs'],
+    ['src/bind/rung0.ts', 'bind-rung0.mjs'],
+    ['src/bind/rung1.ts', 'bind-rung1.mjs'],
+    // S4 modules.
+    ['src/shared/messages.ts', 'messages.mjs'],
+    ['src/engine/tab-driver.ts', 'tab-driver.mjs'],
+    ['src/engine/probe-runner.ts', 'probe-runner.mjs'],
+    ['src/engine/orchestrator.ts', 'orchestrator.mjs'],
   ];
   for (const [entry, out] of nodeModules) {
     await build({
@@ -93,12 +103,18 @@ async function main() {
     platform: 'node',
   });
 
-  // Static assets.
+  // Static assets into dist.
   cpSync(join(root, 'manifest.json'), join(dist, 'manifest.json'));
   cpSync(join(root, 'sidepanel.html'), join(dist, 'sidepanel.html'));
   cpSync(join(root, 'test/harness.html'), join(dist, 'test/harness.html'));
 
-  console.log('Build complete ->', dist);
+  // Also copy extension bundles to root so loading either root or dist/
+  // in chrome://extensions works out of the box.
+  cpSync(join(dist, 'content.js'), join(root, 'content.js'));
+  cpSync(join(dist, 'background.js'), join(root, 'background.js'));
+  cpSync(join(dist, 'sidepanel.js'), join(root, 'sidepanel.js'));
+
+  console.log('Build complete ->', dist, 'and root extension bundles updated');
 }
 
 main().catch((e) => {

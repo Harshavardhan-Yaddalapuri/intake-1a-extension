@@ -2,3 +2,6 @@ node_modules/
 dist/
 *.log
 .DS_Store
+/content.js
+/background.js
+/sidepanel.js

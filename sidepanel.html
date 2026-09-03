@@ -1,18 +1,311 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <title>Intake 1a - Build Agent</title>
-    <style>
-      body { font-family: system-ui, sans-serif; margin: 0; padding: 12px; font-size: 13px; }
-      button { padding: 6px 12px; }
-      pre { white-space: pre-wrap; word-break: break-all; background: #f5f5f5; padding: 8px; border-radius: 4px; max-height: 70vh; overflow: auto; }
-    </style>
-  </head>
-  <body>
-    <h1>Intake 1a Build Agent</h1>
-    <button id="observe">Observe active tab</button>
-    <pre id="output">Click "Observe active tab" to run PERCEIVE.</pre>
-    <script src="sidepanel.js"></script>
-  </body>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Intake AI — eSource Agent</title>
+  <style>
+    :root {
+      --bg: #1a1a2e;
+      --surface: #16213e;
+      --surface2: #0f3460;
+      --text: #e4e4e4;
+      --text-muted: #8b8b9e;
+      --accent: #53c28b;
+      --warning: #e6a23c;
+      --danger: #f56c6c;
+      --info: #409eff;
+      --border: #2d3548;
+      --radius: 6px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      font-size: 13px;
+      line-height: 1.5;
+      background: var(--bg);
+      color: var(--text);
+      overflow-x: hidden;
+    }
+    /* Tab bar */
+    #tabs {
+      display: flex;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .tab {
+      flex: 1;
+      padding: 10px 8px;
+      text-align: center;
+      cursor: pointer;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 500;
+      transition: all 0.15s;
+      border-bottom: 2px solid transparent;
+    }
+    .tab:hover { color: var(--text); background: rgba(255,255,255,0.03); }
+    .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .tab .badge {
+      display: inline-block;
+      background: var(--danger);
+      color: #fff;
+      font-size: 10px;
+      padding: 1px 5px;
+      border-radius: 8px;
+      margin-left: 4px;
+    }
+    /* Panels */
+    .panel { display: none; padding: 12px; }
+    .panel.active { display: block; }
+    /* Cards */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+    .card h3 {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 6px 14px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface2);
+      color: var(--text);
+      cursor: pointer;
+      font-size: 12px;
+      transition: all 0.15s;
+    }
+    .btn:hover { background: #1a4a80; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); color: #111; border-color: var(--accent); }
+    .btn-primary:hover { background: #46b07a; }
+    .btn-danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+    .btn-warning { background: var(--warning); color: #111; border-color: var(--warning); }
+    .btn-sm { padding: 3px 8px; font-size: 11px; }
+    .btn-group { display: flex; gap: 6px; margin-top: 8px; }
+    /* File upload */
+    .file-upload {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s;
+    }
+    .file-upload:hover { border-color: var(--accent); }
+    .file-upload input[type="file"] { display: none; }
+    .file-upload .icon { font-size: 24px; margin-bottom: 6px; }
+    .file-upload .hint { color: var(--text-muted); font-size: 11px; }
+    /* Progress bar */
+    .progress-bar {
+      height: 6px;
+      background: var(--surface);
+      border-radius: 3px;
+      overflow: hidden;
+      margin: 8px 0;
+    }
+    .progress-bar .fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 3px;
+      transition: width 0.3s ease;
+    }
+    /* Stats */
+    .stats { display: flex; gap: 10px; flex-wrap: wrap; }
+    .stat {
+      flex: 1;
+      min-width: 70px;
+      background: var(--surface);
+      padding: 8px;
+      border-radius: var(--radius);
+      text-align: center;
+    }
+    .stat .num { font-size: 20px; font-weight: 700; }
+    .stat .label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; }
+    .stat.verified .num { color: var(--accent); }
+    .stat.escalated .num { color: var(--warning); }
+    .stat.failed .num { color: var(--danger); }
+    /* Escalation item */
+    .escalation-item {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px;
+      margin-bottom: 8px;
+    }
+    .escalation-item .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+    .escalation-item .field-name { font-weight: 600; color: var(--info); }
+    .escalation-item .type-badge {
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      background: var(--surface2);
+      color: var(--text-muted);
+    }
+    .escalation-item .context { color: var(--text-muted); font-size: 11px; }
+    .escalation-item .reason { margin: 6px 0; color: var(--warning); font-size: 12px; }
+    .escalation-item .trap { color: var(--danger); font-style: italic; font-size: 11px; }
+    .escalation-item .evidence {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin: 4px 0;
+      padding: 4px 8px;
+      background: rgba(0,0,0,0.2);
+      border-radius: 3px;
+    }
+    /* Binding report */
+    .binding-row {
+      display: flex;
+      align-items: center;
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      font-size: 12px;
+    }
+    .binding-row .op { flex: 1; font-family: monospace; }
+    .binding-row .rung {
+      width: 24px;
+      text-align: center;
+      font-weight: 700;
+      font-size: 11px;
+    }
+    .binding-row .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 8px;
+    }
+    .binding-row .status-dot.bound { background: var(--accent); }
+    .binding-row .status-dot.needs-human { background: var(--warning); }
+    .binding-row .status-dot.unbindable { background: var(--danger); }
+    /* Summary table */
+    .summary-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .summary-table th, .summary-table td {
+      padding: 6px 8px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    .summary-table th { color: var(--text-muted); font-weight: 500; font-size: 11px; }
+    /* Scrollable */
+    .scroll-list { max-height: 300px; overflow-y: auto; }
+    /* Status banner */
+    .status-banner {
+      padding: 8px 12px;
+      border-radius: var(--radius);
+      margin-bottom: 10px;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .status-banner.running { background: rgba(83,194,139,0.15); color: var(--accent); }
+    .status-banner.paused { background: rgba(230,162,60,0.15); color: var(--warning); }
+    .status-banner.done { background: rgba(83,194,139,0.15); color: var(--accent); }
+    .status-banner.idle { background: rgba(139,139,158,0.1); color: var(--text-muted); }
+    .spinner {
+      width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,0.2);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <nav id="tabs">
+    <button class="tab active" data-tab="preflight">Pre-Flight</button>
+    <button class="tab" data-tab="queue">Queue <span class="badge hidden" id="queue-badge">0</span></button>
+    <button class="tab" data-tab="report">Report</button>
+  </nav>
+
+  <!-- Pre-Flight Tab -->
+  <section id="preflight" class="panel active">
+    <div id="status-banner" class="status-banner idle">
+      Ready to start
+    </div>
+
+    <div class="card" id="upload-card">
+      <h3>Study IR File</h3>
+      <div class="file-upload" id="file-drop">
+        <div class="icon">📄</div>
+        <div>Click to upload <strong>abc-101-study.ir.json</strong></div>
+        <div class="hint">or drag and drop</div>
+        <input type="file" id="ir-file" accept=".json">
+      </div>
+      <div id="ir-summary" class="hidden" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="card hidden" id="capability-card">
+      <h3>Platform Capability Report</h3>
+      <div id="capability-report"></div>
+    </div>
+
+    <div class="btn-group">
+      <button class="btn btn-primary" id="start-btn" disabled>▶ Start Build</button>
+      <button class="btn btn-warning hidden" id="pause-btn">⏸ Pause</button>
+      <button class="btn btn-primary hidden" id="resume-btn">▶ Resume</button>
+    </div>
+  </section>
+
+  <!-- Ambiguity Queue Tab -->
+  <section id="queue" class="panel">
+    <div id="queue-status" class="status-banner idle">No escalations yet</div>
+    <div id="queue-actions" class="hidden" style="margin-bottom:10px;">
+      <button class="btn btn-sm btn-primary" id="approve-all-btn">✓ Approve All Remaining</button>
+    </div>
+    <div id="queue-items"></div>
+  </section>
+
+  <!-- Report Tab -->
+  <section id="report" class="panel">
+    <div id="report-status" class="status-banner idle">No run data yet</div>
+
+    <div class="card" id="progress-card">
+      <h3>Progress</h3>
+      <div class="progress-bar"><div class="fill" id="progress-fill" style="width:0%"></div></div>
+      <div id="progress-label" style="font-size:11px;color:var(--text-muted);">0 / 0 steps</div>
+    </div>
+
+    <div class="stats" id="stats">
+      <div class="stat verified"><div class="num" id="stat-verified">0</div><div class="label">Verified</div></div>
+      <div class="stat escalated"><div class="num" id="stat-escalated">0</div><div class="label">Escalated</div></div>
+      <div class="stat failed"><div class="num" id="stat-failed">0</div><div class="label">Failed</div></div>
+      <div class="stat"><div class="num" id="stat-pending">0</div><div class="label">Pending</div></div>
+    </div>
+
+    <div class="card hidden" id="summary-card">
+      <h3>Run Summary</h3>
+      <div id="summary-content"></div>
+    </div>
+
+    <div class="btn-group">
+      <button class="btn btn-sm hidden" id="export-btn">📥 Export Runtime Log</button>
+    </div>
+  </section>
+
+  <script src="sidepanel.js"></script>
+</body>
 </html>

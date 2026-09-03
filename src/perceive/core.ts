@@ -137,6 +137,12 @@ export function computeRole(el: Element): string {
     if (first) return first;
   }
 
+  // Recognize status messages, toasts, alerts as live regions
+  const className = el.getAttribute('class') || '';
+  if (className.includes('toast') || className.includes('notice') || className.includes('alert')) {
+    return 'status';
+  }
+
   const tag = el.tagName.toLowerCase();
   if (tag === 'input') {
     const type = (el as HTMLInputElement).type || 'text';
@@ -383,6 +389,9 @@ const INTERACTIVE_ROLES = new Set([
   'meter',
   'dialog',
   'alertdialog',
+  'status',
+  'alert',
+  'log',
 ]);
 
 // Structural roles that are only interactive inside a grid/treegrid (or when
