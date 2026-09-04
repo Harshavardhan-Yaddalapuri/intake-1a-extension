@@ -29,28 +29,52 @@ const GUARDED = [
   'src/engine/probe-runner.ts',
 ];
 
-/** Extract single- and double-quoted string literals, ignoring comments. */
-function stringLiterals(source) {
-  const withoutBlockComments = source.replace(/\/\*[\s\S]*?\*\//g, '');
-  const withoutLineComments = withoutBlockComments.replace(/\/\/[^\n]*/g, '');
-  const matches = withoutLineComments.match(/'[^'\n]*'|"[^"\n]*"/g) ?? [];
-  return matches.map((m) => m.slice(1, -1).toLowerCase());
+/** Strip comments so commentary about the defect is not mistaken for it. */
+function stripComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+}
+
+/**
+ * Find UI words used in a COMPARISON against some string.
+ *
+ * The defect is not "an English word appears in this file" — operation ids
+ * ('visit.create'), hint keys ('commit') and post-condition prose ("the visit
+ * list is reached") all legitimately contain these words, and always will.
+ * The defect is testing an element's NAME against a word to decide whether
+ * that element is eligible. That has a narrow syntactic signature:
+ *
+ *     name.includes('save')      x === 'save'      n.startsWith('save')
+ *
+ * so that is what this scans for. A word passed as data — `{ hint: 'commit' }`,
+ * `makeBinding('ctx.commit', ...)` — is not a gate and is not flagged.
+ */
+function gatingComparisons(source) {
+  const code = stripComments(source);
+  const offenders = [];
+  const pattern = /(?:\.includes|\.startsWith|\.endsWith|===|!==|==|!=)\s*\(?\s*'([^'\n]*)'/g;
+  let m;
+  while ((m = pattern.exec(code)) !== null) {
+    const literal = m[1].toLowerCase();
+    for (const word of UI_WORDS) {
+      if (literal.includes(word)) {
+        offenders.push(`compares against "${literal}" (contains "${word}")`);
+        break;
+      }
+    }
+  }
+  return offenders;
 }
 
 for (const file of GUARDED) {
-  test(`${file} contains no English UI-word literals`, () => {
-    const literals = stringLiterals(readFileSync(file, 'utf8'));
-    const offenders = [];
-    for (const literal of literals) {
-      for (const word of UI_WORDS) {
-        if (literal.includes(word)) offenders.push(`"${literal}" contains "${word}"`);
-      }
-    }
+  test(`${file} never compares an element name against an English UI word`, () => {
+    const offenders = gatingComparisons(readFileSync(file, 'utf8'));
     assert.deepEqual(
       offenders,
       [],
-      `${file} uses English UI words in string literals. Lexical hints belong ` +
-      `in src/bind/ranking.ts as ranking data, never as candidate filters:\n  ` +
+      `${file} decides candidate eligibility by reading names. Lexical hints ` +
+      `belong in src/bind/ranking.ts as ranking data, never as filters:\n  ` +
       offenders.join('\n  '),
     );
   });
