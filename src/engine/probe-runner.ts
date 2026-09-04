@@ -34,6 +34,8 @@ import {
   type CommitProbeResult,
 } from '../bind/rung1';
 import { TabDriver } from './tab-driver';
+import { enumerateActionable, rankCandidates } from '../bind/ranking';
+import { rankCommitCandidates } from '../bind/rung0';
 
 export interface DiscoveredPaletteItem {
   name: string;
@@ -60,20 +62,20 @@ export class ProbeRunner {
     const bindings: Partial<Record<CanonicalType, BindingRecord>> = {};
     const discovered: DiscoveredPaletteItem[] = [];
 
-    // Find candidate palette buttons.
-    // In any eSource platform, palette items are buttons or clickable elements
-    // in a sidebar, toolbar, modal, or strip.
-    const candidateButtons = currentObs.elements.filter((e) => {
-      if (e.role !== 'button') return false;
-      const lower = e.name.toLowerCase();
-      // Exclude obvious navigation/header buttons
-      if (lower.includes('back') || lower.includes('home') || lower.includes('close') ||
-          lower.includes('preview') || lower.includes('save') || lower.includes('freeze') ||
-          lower.includes('commit') || lower.includes('cancel') || lower.includes('delete')) {
-        return false;
-      }
-      return true;
-    });
+    // Every actionable control is a palette candidate.
+    //
+    // Placing one and reading back what appeared is the only reliable way to
+    // tell a palette tile from a toolbar button on an unseen platform: a tile
+    // adds a control to the canvas, a toolbar button does not. Excluding
+    // candidates by name here would silently skip whichever tile this platform
+    // names unusually -- and the loop below already handles a non-tile
+    // gracefully, since inspectPlacedControl reports observedRole 'none' and
+    // the iteration moves on. That is the adjudication; a name filter would
+    // pre-empt it.
+    const candidateButtons = rankCandidates(
+      enumerateActionable(currentObs),
+      { hint: 'palette' },
+    ).map((r) => r.el);
 
     for (const btn of candidateButtons) {
       try {
@@ -136,16 +138,24 @@ export class ProbeRunner {
     commitBinding: BindingRecord | null;
     evidence: string[];
   }> {
-    const candidates = currentObs.elements.filter((e) => {
-      if (e.role !== 'button') return false;
-      const n = e.name.toLowerCase();
-      return n.includes('save') || n.includes('freeze') || n.includes('commit') ||
-             n.includes('persist') || n.includes('bank');
-    });
+    // Trial order comes from ranking, not filtering. On a platform whose commit
+    // control is named something nobody guessed, the ranking is near-flat and
+    // the probe simply tries more candidates -- slower and correct, rather than
+    // instant and wrong. The previous filter here required the name to contain
+    // save/freeze/commit/persist/bank; 'freeze' and 'bank' were env-rosetta's
+    // own invented words, added so that fixture would pass.
+    const candidates = rankCommitCandidates(currentObs).map((r) => r.el);
+
+    // A commit probe MUTATES state -- it clicks things, and a click can
+    // navigate away. Cap the trials so a pathological page cannot cause an
+    // unbounded click storm, and report honestly when the cap is reached
+    // rather than claiming nothing could commit.
+    const MAX_COMMIT_TRIALS = 12;
+    const trials = candidates.slice(0, MAX_COMMIT_TRIALS);
 
     const evidence: string[] = [];
 
-    for (const btn of candidates) {
+    for (const btn of trials) {
       try {
         const before = await this.driver.perceive();
         const res = await this.driver.click(btn.handle, false);
@@ -179,6 +189,13 @@ export class ProbeRunner {
       } catch (err) {
         evidence.push(`Error probing "${btn.name}": ${String(err)}`);
       }
+    }
+
+    if (candidates.length > trials.length) {
+      evidence.push(
+        `probed ${trials.length} of ${candidates.length} candidates (capped at ` +
+        `${MAX_COMMIT_TRIALS}); no commit confirmed among them`,
+      );
     }
 
     return { commitBinding: null, evidence };
