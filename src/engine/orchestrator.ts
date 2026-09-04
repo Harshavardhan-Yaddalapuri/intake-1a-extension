@@ -429,6 +429,16 @@ export class Orchestrator {
       presentByVisit,
     );
 
+    // Cached progress is a fast path, never a trust boundary. chrome.storage
+    // persists across a target reset, so runState may claim a visit's fields
+    // are already 'verified' when the LIVE platform just showed that visit
+    // does not exist at all -- the previous run happened against a version of
+    // the platform that no longer exists. Reconciling the cache against this
+    // shallow pass is what makes chrome.storage.local.clear() unnecessary
+    // between runs: only genuinely stale cache is discarded, and a real
+    // resume against an unchanged platform keeps its progress.
+    await this.invalidateStaleCache(presentByVisit);
+
     this.journal.note(
       'preflight',
       `${this.treeSummary.visitsPresent} of ${this.treeSummary.visitsWanted} visits and ` +
@@ -440,6 +450,50 @@ export class Orchestrator {
     );
 
     this.callbacks.onReconcileSummary?.(this.treeSummary, this.deepReconcileAvailable);
+  }
+
+  /**
+   * Discard cached progress for any visit the live platform just showed does
+   * not exist.
+   *
+   * A cache entry is trustworthy only as long as the platform it describes is
+   * the same platform state that produced it. `presentByVisit` is this run's
+   * OWN live observation, taken moments ago, so it is authoritative: if a
+   * visit is absent from it, nothing under that visit can genuinely be built,
+   * regardless of what an earlier session's runState claims.
+   *
+   * Deliberately coarse: a full run reset (cursor back to 0) rather than a
+   * surgical per-item repair. Re-deriving from reconcile is cheap -- adopt
+   * decisions for anything the platform genuinely has are near-instant -- and
+   * correctness here matters far more than shaving a few redundant reconcile
+   * calls.
+   */
+  private async invalidateStaleCache(presentByVisit: Record<string, string[]>): Promise<void> {
+    const presentVisitNames = new Set(Object.keys(presentByVisit).map((n) => normaliseLabel(n)));
+    let invalidated = false;
+
+    for (const item of this.linearItems) {
+      const key = idempotencyKey(item.visit_id, item.form_id, item.field_id);
+      const record = this.runState.items[key];
+      if (!record || record.state === 'pending') continue;
+
+      if (!presentVisitNames.has(normaliseLabel(item.visit_name))) {
+        record.state = 'pending';
+        record.last_verdict = undefined;
+        record.rebind_count = 0;
+        invalidated = true;
+      }
+    }
+
+    if (invalidated) {
+      this.runState.cursor = 0;
+      this.journal.note(
+        'preflight',
+        'cached progress from a previous run referenced a visit the platform ' +
+        'no longer has; that progress was discarded rather than trusted',
+      );
+      await saveRunState(this.adapter, this.runState);
+    }
   }
 
   /** Navigate to a visit by its input-file name. Returns false when no visit
@@ -704,9 +758,9 @@ export class Orchestrator {
     // straight to the human, so the build completes either way.
     const rung2Evidence: string[] = [];
     if (!typeBinding) {
-      const stored = await chrome.storage.local.get('anthropicApiKey');
+      const stored = await chrome.storage.local.get('openRouterApiKey');
       const apiKey: string | null =
-        typeof stored?.anthropicApiKey === 'string' ? stored.anthropicApiKey : null;
+        typeof stored?.openRouterApiKey === 'string' ? stored.openRouterApiKey : null;
 
       if (apiKey) {
         const { observation: paletteObs } = await this.driver.perceive();
