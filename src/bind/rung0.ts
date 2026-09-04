@@ -21,6 +21,12 @@ import type {
   RecipeStep,
 } from '../shared/contract';
 import type { Observation, ObservationElement } from '../perceive/core';
+import {
+  enumerateActionable,
+  enumerateByRoles,
+  rankCandidates,
+  explainRanking,
+} from './ranking';
 
 // ---------------------------------------------------------------------------
 // Candidate search: find elements matching role + optional name constraints.
@@ -91,75 +97,48 @@ export function findByRoleOnly(obs: Observation, role: string): Candidate[] {
 // ---------------------------------------------------------------------------
 
 /**
- * Bind nav.to_study_root: find a navigation element (link/button) whose
- * accessible name suggests the study root / plan / study home.
- * Name-only matches are hypotheses.
+ * Bind nav.to_study_root.
+ *
+ * Every actionable control is a candidate. Ranking picks a trial order using
+ * weak signals; it never removes anything from the pool. On a platform whose
+ * study-root control is worded in a way nobody guessed, the pool is still
+ * non-empty and the probe adjudicates -- which is the whole point.
  */
 export function bindNavToStudyRoot(obs: Observation): BindingRecord | null {
-  // Structural: look for a link/button with role=link or role=button that
-  // contains navigation-type words in the name. We use language-agnostic
-  // heuristics: look for a nav/heading element with "study" or "plan" in
-  // the name, or the first link in a nav region.
-  const candidates: Candidate[] = [];
+  const pool = enumerateActionable(obs);
+  if (pool.length === 0) return null;
 
-  // Look for buttons/links whose name suggests study plan or home.
-  for (const el of obs.elements) {
-    if (el.role !== 'button' && el.role !== 'link') continue;
-    const name = el.name.toLowerCase();
-    if (name.includes('study') || name.includes('plan')) {
-      candidates.push({
-        el,
-        confidence: 'hypothesis',
-        evidence: `role=${el.role}, name~="${el.name}" (name match, hypothesis)`,
-      });
-    }
-  }
+  const ranked = rankCandidates(pool, { hint: 'study_root' });
+  const best = ranked[0];
 
-  // If no name match, look for a navigation tab/heading at the top.
-  if (candidates.length === 0) {
-    for (const el of obs.elements) {
-      if (el.role === 'link' && el.nameSource !== 'none' && el.nameSource !== 'placeholder') {
-        candidates.push({
-          el,
-          confidence: 'tentative',
-          evidence: `role=link, name="${el.name}" (first structural link)`,
-        });
-        break;
-      }
-    }
-  }
-
-  if (candidates.length === 0) return null;
-  const best = candidates[0];
-  return makeBinding('nav.to_study_root', 0, [
-    { step: 'click', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id' },
-  ], `navigation to study root available`, [best.evidence], best.confidence);
+  return makeBinding(
+    'nav.to_study_root',
+    0,
+    [{ step: 'click', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id' }],
+    'the study root / plan screen is reached',
+    [explainRanking(best, pool.length)],
+    'hypothesis',
+  );
 }
 
 /**
- * Bind nav.to_visit_list: find a way to reach the visit list. This is
- * usually a link/button with "visit" or "schedule" in the name.
+ * Bind nav.to_visit_list: reach the list of visits.
  */
 export function bindNavToVisitList(obs: Observation): BindingRecord | null {
-  const candidates: Candidate[] = [];
+  const pool = enumerateActionable(obs);
+  if (pool.length === 0) return null;
 
-  for (const el of obs.elements) {
-    if (el.role !== 'button' && el.role !== 'link') continue;
-    const name = el.name.toLowerCase();
-    if (name.includes('visit') || name.includes('schedule')) {
-      candidates.push({
-        el,
-        confidence: 'hypothesis',
-        evidence: `role=${el.role}, name~="${el.name}" (name match, hypothesis)`,
-      });
-    }
-  }
+  const ranked = rankCandidates(pool, { hint: 'visit_list' });
+  const best = ranked[0];
 
-  if (candidates.length === 0) return null;
-  const best = candidates[0];
-  return makeBinding('nav.to_visit_list', 0, [
-    { step: 'click', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id' },
-  ], `navigation to visit list available`, [best.evidence], best.confidence);
+  return makeBinding(
+    'nav.to_visit_list',
+    0,
+    [{ step: 'click', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id' }],
+    'the visit list is reached',
+    [explainRanking(best, pool.length)],
+    'hypothesis',
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -167,54 +146,49 @@ export function bindNavToVisitList(obs: Observation): BindingRecord | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Bind visit.create: find a button whose name suggests adding/creating a
- * visit. The recipe is: click the add button, then fill the name input,
- * then click save.
+ * Bind visit.create.
+ *
+ * The recipe is click-add, then name it, then confirm. The name field and the
+ * confirm control usually appear only AFTER the add control is clicked, so at
+ * rung 0 they are opportunistic: recorded when they happen to be visible
+ * already, and rediscovered by the orchestrator from a fresh observation
+ * otherwise. The visit name itself is substituted from the IR at act time,
+ * never baked into the binding.
  */
 export function bindVisitCreate(obs: Observation): BindingRecord | null {
-  // Find an "add" button near visit context.
-  const addCandidates: Candidate[] = [];
-  for (const el of obs.elements) {
-    if (el.role !== 'button') continue;
-    const name = el.name.toLowerCase();
-    if (name.includes('add') && (name.includes('visit') || name.includes('new'))) {
-      addCandidates.push({
-        el,
-        confidence: 'structural',
-        evidence: `role=button, name~="${el.name}"`,
-      });
-    }
-    // Broader: "add" or "new" or "+"
-    if (name.includes('add') || name === '+') {
-      addCandidates.push({
-        el,
-        confidence: 'hypothesis',
-        evidence: `role=button, name~="${el.name}" (name match, hypothesis)`,
-      });
-    }
-  }
+  const pool = enumerateActionable(obs);
+  if (pool.length === 0) return null;
 
-  if (addCandidates.length === 0) return null;
+  const ranked = rankCandidates(pool, { hint: 'visit_create' });
+  const best = ranked[0];
 
-  // Also need a name input and a save button in the resulting form.
-  // These are discovered after the add button is clicked; the recipe
-  // encodes them as subsequent steps.
-  const best = addCandidates[0];
   const recipe: RecipeStep[] = [
-    { step: 'click', evidence_role: 'button', evidence_name: best.el.name, handle_kind: 'snapshot-id' },
+    { step: 'click', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id' },
   ];
+  const evidence: string[] = [explainRanking(best, pool.length)];
 
-  // Look for a name input that might appear (or already visible).
-  const nameInputs = findByRole(obs, 'textbox', { contains: 'visit' })
-    .concat(findByRole(obs, 'textbox', { contains: 'name' }));
-  if (nameInputs.length > 0) {
-    recipe.push({ step: 'set_value', evidence_role: 'textbox', evidence_name: nameInputs[0].el.name, handle_kind: 'snapshot-id', value_from: 'ir' });
+  const textPool = enumerateByRoles(obs, ['textbox', 'searchbox']);
+  if (textPool.length > 0) {
+    const nameBox = rankCandidates(textPool, { hint: 'name_input' })[0];
+    recipe.push({
+      step: 'set_value',
+      evidence_role: nameBox.el.role,
+      evidence_name: nameBox.el.name,
+      handle_kind: 'snapshot-id',
+      value_from: 'ir',
+    });
+    evidence.push(`name field: ${explainRanking(nameBox, textPool.length)}`);
   }
 
-  // Look for a save button.
-  const saveButtons = findByRole(obs, 'button', { contains: 'save' });
-  if (saveButtons.length > 0) {
-    recipe.push({ step: 'click', evidence_role: 'button', evidence_name: saveButtons[0].el.name, handle_kind: 'snapshot-id' });
+  const confirm = rankCandidates(pool, { hint: 'commit' })[0];
+  if (confirm && confirm.el.handle !== best.el.handle) {
+    recipe.push({
+      step: 'click',
+      evidence_role: confirm.el.role,
+      evidence_name: confirm.el.name,
+      handle_kind: 'snapshot-id',
+    });
+    evidence.push(`confirm control: ${explainRanking(confirm, pool.length)}`);
   }
 
   return makeBinding(
@@ -222,36 +196,36 @@ export function bindVisitCreate(obs: Observation): BindingRecord | null {
     0,
     recipe,
     'a new visit appears in the visit list after save',
-    [best.evidence, ...(nameInputs.length > 0 ? [nameInputs[0].evidence] : []), ...(saveButtons.length > 0 ? [saveButtons[0].evidence] : [])],
-    best.confidence,
+    evidence,
+    'hypothesis',
   );
 }
 
 /**
- * Bind visit.open: find a link/button that opens a specific visit. This
- * is usually a link with the visit name in a table/list.
+ * Bind visit.open: reach a specific visit's detail screen.
+ *
+ * The orchestrator resolves WHICH visit by matching the IR-supplied name
+ * against the observation at act time. A name from the input file is data,
+ * not a hardcoded vocabulary guess, so that comparison is legitimate; this
+ * binding only establishes that visits are openable at all.
  */
 export function bindVisitOpen(obs: Observation): BindingRecord | null {
-  // Look for links that could be visit rows.
-  const candidates: Candidate[] = [];
-  for (const el of obs.elements) {
-    if (el.role !== 'link' && el.role !== 'button') continue;
-    const name = el.name.toLowerCase();
-    if (name.includes('visit') || el.tagName === 'a') {
-      candidates.push({
-        el,
-        confidence: 'tentative',
-        evidence: `role=${el.role}, name="${el.name}"`,
-      });
-    }
-  }
+  const pool = enumerateActionable(obs);
+  if (pool.length === 0) return null;
 
-  if (candidates.length === 0) return null;
-  const best = candidates[0];
-  return makeBinding('visit.open', 0, [
-    { step: 'click', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id' },
-  ], `visit detail view appears`, [best.evidence], best.confidence);
+  const ranked = rankCandidates(pool, { hint: 'visit_open' });
+  const best = ranked[0];
+
+  return makeBinding(
+    'visit.open',
+    0,
+    [{ step: 'click', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id' }],
+    'the named visit detail screen is reached',
+    [explainRanking(best, pool.length)],
+    'hypothesis',
+  );
 }
+
 
 // ---------------------------------------------------------------------------
 // Form ops: form.create, form.open, form.exists.
