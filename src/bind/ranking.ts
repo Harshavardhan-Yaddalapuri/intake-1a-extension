@@ -151,6 +151,66 @@ export function enumerateActionable(obs: Observation): ObservationElement[] {
   );
 }
 
+/** Roles that PERFORM an action rather than hold a value.
+ *
+ *  A narrower set than ACTIONABLE_ROLES, which deliberately includes
+ *  checkbox/radio/switch because a palette tile can be any of those. When the
+ *  question is "which control confirms this dialog", a value-holding control
+ *  is never the answer, and including one lets a stray checkbox outrank the
+ *  actual confirm button. */
+const ACTION_ROLES = new Set([
+  'button', 'link', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'tab',
+]);
+
+/** Every element that performs an action, regardless of its name. Used where
+ *  a value-holding control cannot be the right answer. */
+export function enumerateActions(obs: Observation): ObservationElement[] {
+  return obs.elements.filter((e) => ACTION_ROLES.has(e.role) || e.role === 'generic');
+}
+
+/**
+ * Find the tightest container holding the most controls.
+ *
+ * A field palette is, structurally, a large group of sibling-ish controls: 13
+ * tiles under one ancestor, versus 4 nav links under another and 4 toolbar
+ * buttons under a third. Tiles are often each wrapped in their own div, so
+ * immediate-parent grouping does not find them -- the search therefore walks
+ * up several levels and keeps whichever ancestor captures the largest cluster.
+ *
+ * This matters because probing is destructive: clicking a nav link to see
+ * whether it is a palette tile navigates away from the designer and breaks
+ * every probe after it. Knowing where the palette lives lets the probe try
+ * those candidates FIRST, so it finds what it needs before it can wander off.
+ *
+ * Purely structural -- no names are read.
+ */
+export function largestControlCluster(
+  pool: readonly ObservationElement[],
+): { regionHandle: string; members: ObservationElement[] } | null {
+  let best: { regionHandle: string; members: ObservationElement[] } | null = null;
+
+  for (let strip = 1; strip <= 6; strip += 1) {
+    const groups = new Map<string, ObservationElement[]>();
+    for (const el of pool) {
+      const parts = el.handle.split('.');
+      if (parts.length <= strip) continue;
+      const key = parts.slice(0, parts.length - strip).join('.');
+      const bucket = groups.get(key);
+      if (bucket) bucket.push(el);
+      else groups.set(key, [el]);
+    }
+    for (const [regionHandle, members] of groups) {
+      // Too small to be a palette, or so large it is simply the whole app.
+      if (members.length < 3) continue;
+      if (members.length > pool.length * 0.8) continue;
+      if (!best || members.length > best.members.length) {
+        best = { regionHandle, members };
+      }
+    }
+  }
+  return best;
+}
+
 /** Every element matching one of the given roles, regardless of its name. */
 export function enumerateByRoles(obs: Observation, roles: readonly string[]): ObservationElement[] {
   const wanted = new Set(roles);

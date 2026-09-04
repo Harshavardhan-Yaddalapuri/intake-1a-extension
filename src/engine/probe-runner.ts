@@ -34,7 +34,7 @@ import {
   type CommitProbeResult,
 } from '../bind/rung1';
 import { TabDriver } from './tab-driver';
-import { enumerateActionable, rankCandidates } from '../bind/ranking';
+import { enumerateActionable, enumerateActions, rankCandidates, largestControlCluster } from '../bind/ranking';
 import { rankCommitCandidates } from '../bind/rung0';
 
 export interface DiscoveredPaletteItem {
@@ -72,10 +72,25 @@ export class ProbeRunner {
     // gracefully, since inspectPlacedControl reports observedRole 'none' and
     // the iteration moves on. That is the adjudication; a name filter would
     // pre-empt it.
-    const candidateButtons = rankCandidates(
-      enumerateActionable(currentObs),
-      { hint: 'palette' },
-    ).map((r) => r.el);
+    // Probing is DESTRUCTIVE: clicking a control to see whether it places a
+    // field will, if that control is a nav link, navigate away from the
+    // designer and break every probe after it. So the trial order puts the
+    // palette region first, found structurally as the tightest container
+    // holding the most controls, and the sweep is capped.
+    const allActionable = enumerateActionable(currentObs);
+    const cluster = largestControlCluster(allActionable);
+    const ranked = rankCandidates(allActionable, {
+      hint: 'palette',
+      regionHandle: cluster?.regionHandle,
+    });
+    const inRegion = cluster
+      ? ranked.filter((r) => cluster.members.some((m) => m.handle === r.el.handle))
+      : [];
+    const rest = ranked.filter((r) => !inRegion.includes(r));
+    const MAX_PALETTE_TRIALS = 40;
+    const candidateButtons = [...inRegion, ...rest]
+      .slice(0, MAX_PALETTE_TRIALS)
+      .map((r) => r.el);
 
     for (const btn of candidateButtons) {
       try {
@@ -92,8 +107,14 @@ export class ProbeRunner {
         // 3. Snapshot after click
         const after = await this.driver.perceiveAfterSettle(200);
 
-        // 4. Inspect the placed control from the diff
-        const probe = inspectPlacedControl(before.observation, after.observation);
+        // 4. Inspect the placed control from the diff. A choice control that
+        //    arrived empty is roleless, so give it values and look again.
+        let observed = after.observation;
+        let probe = inspectPlacedControl(before.observation, observed);
+        if (probe.hasOptionsEditor && (probe.observedRole === 'generic' || probe.observedRole === 'none')) {
+          observed = await this.deepenChoiceProbe(before.observation, observed);
+          probe = inspectPlacedControl(before.observation, observed);
+        }
         if (probe.observedRole === 'none') {
           // Nothing appeared on canvas -- not an element creator
           continue;
@@ -132,6 +153,48 @@ export class ProbeRunner {
   }
 
   /**
+   * Give a placed choice control some values so it can reveal what it is.
+   *
+   * An EMPTY choice control is roleless: a radio group with no options and a
+   * dropdown with no options both render as a bare container, so the probe
+   * reads role 'generic' and can classify neither. Adding two values makes the
+   * platform render the real control and the role appears -- verified on the
+   * supplied mock, where "Radio Buttons" reads as 'generic' when empty and as
+   * 'radio' once it has options.
+   *
+   * The add-value control is found among the actions the PROPERTY PANEL
+   * brought with it, never across the whole page: ranking page-wide picks a
+   * palette tile called "Check List" over the panel's "+ Add Value", because
+   * both match the coded-value hint and the tile happens to come first.
+   */
+  private async deepenChoiceProbe(
+    beforePlace: Observation,
+    afterPlace: Observation,
+  ): Promise<Observation> {
+    const appeared = new Set(diffObservations(beforePlace, afterPlace).added);
+    const panelActions = enumerateActions(afterPlace).filter((e) => appeared.has(e.handle));
+    if (panelActions.length === 0) return afterPlace;
+
+    const addValue = rankCandidates(panelActions, { hint: 'coded_values' })[0]?.el;
+    if (!addValue) return afterPlace;
+
+    let current = afterPlace;
+    for (let i = 0; i < 2; i += 1) {
+      const before = current;
+      const target = current.elements.find((e) => e.handle === addValue.handle) ? addValue.handle : null;
+      if (!target) break;
+      const res = await this.driver.click(target);
+      if (!res.ok) break;
+      await this.sleep(200);
+      current = (await this.driver.perceiveAfterSettle(150)).observation;
+      // If the click added nothing, it was not the add-value control; stop
+      // rather than clicking it repeatedly.
+      if (diffObservations(before, current).added.length === 0) break;
+    }
+    return current;
+  }
+
+  /**
    * Place ONE specific candidate and read back what appeared.
    *
    * This is the adjudication step for rung 2: the model names a candidate,
@@ -153,7 +216,12 @@ export class ProbeRunner {
     await this.sleep(250);
     const after = await this.driver.perceiveAfterSettle(200);
 
-    const probe = inspectPlacedControl(before.observation, after.observation);
+    let observed = after.observation;
+    let probe = inspectPlacedControl(before.observation, observed);
+    if (probe.hasOptionsEditor && (probe.observedRole === 'generic' || probe.observedRole === 'none')) {
+      observed = await this.deepenChoiceProbe(before.observation, observed);
+      probe = inspectPlacedControl(before.observation, observed);
+    }
     if (probe.observedRole === 'none') return { probe, matchedTypes: [] };
 
     const matchedTypes = CANONICAL_TYPES.filter(

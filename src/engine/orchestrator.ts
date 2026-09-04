@@ -17,7 +17,7 @@
  *   - Pre-flight runs discovery probes before the main execution loop.
  */
 
-import { diffObservations, type Observation } from '../perceive/core';
+import { diffObservations, type Observation, type ObservationElement } from '../perceive/core';
 import type { Ir, IrVisit, IrForm, IrField } from '../plan/ir';
 import type {
   Plan,
@@ -70,6 +70,7 @@ import { analyzeCommit } from '../bind/rung1';
 import {
   LEXICAL_HINTS,
   enumerateActionable,
+  enumerateActions,
   enumerateByRoles,
   rankCandidates,
 } from '../bind/ranking';
@@ -1100,6 +1101,9 @@ export class Orchestrator {
       const { observation } = await this.driver.perceive();
       const addPool = enumerateActionable(observation);
       const addBtn = rankCandidates(addPool, { hint: 'visit_create' })[0]?.el;
+      // Remember the pre-dialog surface so the controls the dialog brings with
+      // it can be told apart from the page chrome that was always there.
+      this.preDialogObs = observation;
       if (addBtn) {
         await this.driver.click(addBtn.handle);
         await this.sleep(300);
@@ -1129,7 +1133,7 @@ export class Orchestrator {
 
     // Click save.
     const { observation: saveObs } = await this.driver.perceive();
-    const saveBtn = rankCandidates(enumerateActionable(saveObs), { hint: 'commit' })[0]?.el;
+    const saveBtn = this.pickDialogCommit(saveObs);
     if (saveBtn) {
       await this.driver.click(saveBtn.handle, false);
       await this.sleep(500);
@@ -1246,6 +1250,7 @@ export class Orchestrator {
     // platform has its own word for it and the previous list was a guess.
     const { observation } = await this.driver.perceive();
     const newBtn = rankCandidates(enumerateActionable(observation), { hint: 'form_create' })[0]?.el;
+    this.preDialogObs = observation;
     if (newBtn) {
       await this.driver.click(newBtn.handle);
       await this.sleep(300);
@@ -1274,7 +1279,7 @@ export class Orchestrator {
 
     // Click create/save.
     const { observation: saveObs } = await this.driver.perceive();
-    const createBtn = rankCandidates(enumerateActionable(saveObs), { hint: 'commit' })[0]?.el;
+    const createBtn = this.pickDialogCommit(saveObs);
     if (createBtn) {
       await this.driver.click(createBtn.handle, false);
       await this.sleep(500);
@@ -1526,6 +1531,54 @@ export class Orchestrator {
       field_label: e.fieldLabel,
       declared_type: e.canonicalType,
     };
+  }
+
+  /** Observation taken immediately before a dialog was opened, so the controls
+   *  the dialog brought with it can be identified structurally. */
+  private preDialogObs: Observation | null = null;
+
+  /**
+   * Choose the control that confirms an open dialog.
+   *
+   * Ranking across the whole page is not good enough here. A dialog's confirm
+   * button competes with every piece of persistent page chrome, and when no
+   * lexical hint matches -- a button simply labelled "Create" matches nothing
+   * in the commit vocabulary -- the tie falls to DOM order and the agent
+   * clicks the first nav link on the page, navigating away and losing the
+   * dialog entirely. That is not a hypothetical: it is what happened to
+   * form creation on the supplied mock.
+   *
+   * The structural fix is that a dialog's controls APPEARED when the dialog
+   * opened, and page chrome did not. Diff membership already outweighs any
+   * lexical hint 3:1 in the ranking, so passing it here settles the question
+   * without adding a single word to any list.
+   */
+  private pickDialogCommit(current: Observation): ObservationElement | undefined {
+    // Actions only. A dialog's confirm control is never a checkbox, and
+    // including value-holding controls here let a stray "Repeating log"
+    // tick-box outrank the actual Create button on the supplied mock.
+    const pool = enumerateActions(current);
+    const diffAdded = this.preDialogObs
+      ? diffObservations(this.preDialogObs, current).added
+      : undefined;
+    const ranked = rankCandidates(pool, { hint: 'commit', diffAdded });
+
+    // Among controls the dialog brought with it, prefer one that is not the
+    // dismiss control -- cancel and confirm both appear in the same diff.
+    const appeared = diffAdded
+      ? ranked.filter((r) => diffAdded.includes(r.el.handle))
+      : [];
+    if (appeared.length > 1) {
+      const discardRanked = rankCandidates(appeared.map((r) => r.el), { hint: 'discard' });
+      const dismiss = discardRanked[0];
+      const dismissHasSignal = dismiss?.signals.some((sg) => sg.name === 'lexical');
+      if (dismissHasSignal) {
+        const notDismiss = appeared.find((r) => r.el.handle !== dismiss.el.handle);
+        if (notDismiss) return notDismiss.el;
+      }
+    }
+
+    return (appeared[0] ?? ranked[0])?.el;
   }
 
   /** Provenance for a step: which entry in the input file it came from. */
