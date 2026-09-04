@@ -26,6 +26,7 @@ import {
   enumerateByRoles,
   rankCandidates,
   explainRanking,
+  type RankedCandidate,
 } from './ranking';
 
 // ---------------------------------------------------------------------------
@@ -698,63 +699,63 @@ export function bindFieldSetCodedValues(obs: Observation): BindingRecord | null 
 // ---------------------------------------------------------------------------
 
 /**
- * Bind ctx.commit: find the real persist/commit button. Name-only matches
- * are hypotheses. The rung 1 commit probe confirms by reading the
- * post-condition (persisted indicator / working-copy banner disappearance).
+ * Bind ctx.commit.
+ *
+ * The single most consequential binding in the contract: if this is wrong,
+ * work is never persisted and nothing says so. Every actionable control is
+ * therefore a candidate. Ranking picks a TRIAL ORDER; it does not decide.
+ * The rung 1 commit probe clicks candidates in that order until one
+ * demonstrably clears the working-copy state, because not every button that
+ * looks like save actually saves -- and on an unseen platform, the one that
+ * does save may not look like it either.
  */
 export function bindCtxCommit(obs: Observation): BindingRecord | null {
-  const candidates: Candidate[] = [];
+  const pool = enumerateActionable(obs);
+  if (pool.length === 0) return null;
 
-  for (const el of obs.elements) {
-    if (el.role !== 'button') continue;
-    const name = el.name.toLowerCase();
-    if (name.includes('save') || name.includes('commit') || name.includes('persist')) {
-      // "Save" is a hypothesis -- "not every save-looking button saves"
-      // (criterion 11). The commit probe (rung 1) confirms.
-      candidates.push({
-        el,
-        confidence: 'hypothesis',
-        evidence: `role=button, name~="${el.name}" (name match, hypothesis -- commit probe required)`,
-      });
-    }
-    if (name.includes('activate')) {
-      // "Activate" is a stronger candidate in some platforms.
-      candidates.push({
-        el,
-        confidence: 'hypothesis',
-        evidence: `role=button, name~="${el.name}" (name match, hypothesis)`,
-      });
-    }
-  }
+  const ranked = rankCandidates(pool, { hint: 'commit' });
+  const best = ranked[0];
 
-  if (candidates.length === 0) return null;
-  const best = candidates[0];
-  return makeBinding('ctx.commit', 0, [
-    { step: 'click', evidence_role: 'button', evidence_name: best.el.name, handle_kind: 'snapshot-id' },
-  ], `persisted indicator appears / working-copy banner disappears`, [best.evidence], 'hypothesis');
+  return makeBinding(
+    'ctx.commit',
+    0,
+    [{ step: 'click', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id' }],
+    'persisted indicator appears / working-copy banner disappears',
+    [
+      explainRanking(best, pool.length),
+      'rung 1 commit probe required before this binding is trusted',
+    ],
+    'hypothesis',
+  );
+}
+
+/** The full trial order for the commit probe. Exported so ProbeRunner works
+ *  down the ranked list instead of testing a name-filtered subset. */
+export function rankCommitCandidates(obs: Observation): RankedCandidate[] {
+  return rankCandidates(enumerateActionable(obs), { hint: 'commit' });
 }
 
 /**
- * Bind ctx.is_committed: read-back check. At rung 0, we look for a status
- * indicator (text/banner) that shows committed state. This is a read-only
- * observation.
+ * Bind ctx.is_committed.
+ *
+ * There is no reliable cross-platform marker for "saved", so this binding does
+ * not pretend to know one. It records which elements are plausibly status
+ * bearing -- named, non-actionable text regions -- and defers the decision to
+ * the rung 1 commit probe, which compares pre- and post-commit observations
+ * and identifies which of them actually changes.
  */
 export function bindCtxIsCommitted(obs: Observation): BindingRecord | null {
-  // Look for status indicators in the observation: elements whose name
-  // contains "active", "saved", "committed", "draft", "unsaved".
-  const indicators = obs.elements.filter((e) => {
-    const name = e.name.toLowerCase();
-    return name.includes('active') || name.includes('saved') || name.includes('committed') || name.includes('draft') || name.includes('unsaved');
-  });
+  const statusRoles = ['status', 'alert', 'note', 'banner', 'contentinfo', 'generic', 'paragraph'];
+  const structural = enumerateByRoles(obs, statusRoles).filter((e) => e.name.length > 0);
+  const ranked = rankCandidates(structural, { hint: 'status' });
 
-  if (indicators.length === 0) {
-    // No observable indicator -- needs human (honest escalation).
+  if (ranked.length === 0) {
     return makeBinding(
       'ctx.is_committed',
       0,
       [{ step: 'wait', handle_kind: 'role-only' }],
-      'commit status is observable via a status indicator',
-      ['no status indicator found at rung 0 -- needs rung 1 probe or human'],
+      'commit status is observable as a change between pre- and post-commit observations',
+      ['no status-bearing element found at rung 0 -- the commit probe must decide from the diff alone'],
       'tentative',
     );
   }
@@ -763,36 +764,36 @@ export function bindCtxIsCommitted(obs: Observation): BindingRecord | null {
     'ctx.is_committed',
     0,
     [{ step: 'wait', handle_kind: 'role-only' }],
-    'commit status is observable via a status indicator',
-    [`status indicators: ${indicators.map((i) => i.name).join(', ')}`],
-    'structural',
+    'commit status is observable as a change between pre- and post-commit observations',
+    [
+      `${ranked.length} status-bearing candidate(s); top = "${ranked[0].el.name}" ` +
+      `(${explainRanking(ranked[0], ranked.length)})`,
+    ],
+    'tentative',
   );
 }
 
 /**
- * Bind ctx.discard: find a cancel/discard button or a navigation action
- * that abandons the working copy.
+ * Bind ctx.discard: abandon the working copy.
+ *
+ * Ranked, never gated. A mis-ranked discard costs an extra probe; a gated one
+ * that finds nothing leaves the agent unable to back out of a bad state.
  */
 export function bindCtxDiscard(obs: Observation): BindingRecord | null {
-  const candidates: Candidate[] = [];
+  const pool = enumerateActionable(obs);
+  if (pool.length === 0) return null;
 
-  for (const el of obs.elements) {
-    if (el.role !== 'button' && el.role !== 'link') continue;
-    const name = el.name.toLowerCase();
-    if (name.includes('cancel') || name.includes('discard') || name.includes('close') || name.includes('back')) {
-      candidates.push({
-        el,
-        confidence: 'hypothesis',
-        evidence: `role=${el.role}, name~="${el.name}" (name match, hypothesis)`,
-      });
-    }
-  }
+  const ranked = rankCandidates(pool, { hint: 'discard' });
+  const best = ranked[0];
 
-  if (candidates.length === 0) return null;
-  const best = candidates[0];
-  return makeBinding('ctx.discard', 0, [
-    { step: 'click', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id' },
-  ], `working copy is abandoned and the builder closes`, [best.evidence], 'hypothesis');
+  return makeBinding(
+    'ctx.discard',
+    0,
+    [{ step: 'click', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id' }],
+    'the working copy is abandoned and the editor closes',
+    [explainRanking(best, pool.length)],
+    'hypothesis',
+  );
 }
 
 // ---------------------------------------------------------------------------

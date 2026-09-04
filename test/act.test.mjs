@@ -347,7 +347,15 @@ test('BIND rung0: bindCtxCommit finds save button as hypothesis', async () => {
   const binding = bindCtxCommit(obs);
   assert.ok(binding, 'should find a commit candidate');
   assert.equal(binding.op, 'ctx.commit');
-  assert.ok(binding.evidence.some((e) => e.includes('hypothesis')), 'should be flagged as hypothesis');
+  // The binding must declare itself unconfirmed. Which candidate ranks first
+  // is not asserted: ranking only picks a trial order, and the rung 1 probe
+  // decides which control actually persists. "Save" and "Activate" are both
+  // plausible and a platform may use either.
+  assert.ok(
+    binding.evidence.some((e) => /probe required|not.*trusted/i.test(e)),
+    'commit binding must state that it needs probe confirmation before being trusted',
+  );
+  assert.equal(binding.rung, 0);
 });
 
 test('BIND rung0: bindFieldAdd for single_select finds hypothesis button', async () => {
