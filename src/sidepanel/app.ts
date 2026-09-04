@@ -10,6 +10,8 @@
  */
 
 import type { CapabilityReport, BindingRecord, ContractOpId, CanonicalType } from '../shared/contract';
+import type { TreeSummary } from '../engine/reconcile';
+import type { JournalExport } from '../shared/messages';
 import { CANONICAL_TYPES } from '../shared/contract';
 import type {
   EscalationItem,
@@ -155,6 +157,12 @@ chrome.runtime.onMessage.addListener((message) => {
   if (!message?.type) return;
 
   switch (message.type) {
+    case 'RECONCILE_SUMMARY':
+      renderReconcileSummary(message.summary, message.deepReconcileAvailable);
+      break;
+    case 'PARKED_REVIEW':
+      renderParkedReview(message.items);
+      break;
     case 'PREFLIGHT_REPORT':
       handlePreflightReport(message.report, message.plan);
       break;
@@ -260,20 +268,41 @@ function renderEscalationItem(item: EscalationItem): void {
   el.className = 'escalation-item';
   el.dataset.key = item.key;
 
+  // Blast radius turns 195 confirmations into at most 13 decisions: a type
+  // mapping answered once settles every field of that type.
+  const radius = item.blastRadius
+    ? `<div class="radius" style="font-size:11px;color:var(--text-muted);margin-top:4px;">` +
+      `Affects ${item.blastRadius.fields} field${item.blastRadius.fields === 1 ? '' : 's'} ` +
+      `across ${item.blastRadius.forms} form${item.blastRadius.forms === 1 ? '' : 's'}. ` +
+      `Answering once settles all of them.</div>`
+    : '';
+
+  const gate = item.blocking
+    ? `<span class="type-badge" style="background:#7a2e2e;" title="The run is waiting on this">Blocking</span>`
+    : `<span class="type-badge" style="background:#3a3a46;" title="The run continued; review at your convenience">Parked</span>`;
+
+  const skipLabel = item.blastRadius && item.blastRadius.fields > 1
+    ? `⊘ Skip these ${item.blastRadius.fields}`
+    : '⊘ Skip';
+
   el.innerHTML = `
     <div class="header">
-      <span class="field-name">${item.fieldLabel}</span>
-      <span class="type-badge">${item.canonicalType}</span>
+      <span class="field-name">${esc(item.fieldLabel)}</span>
+      <span class="type-badge">${esc(item.canonicalType)}</span>
+      ${gate}
     </div>
-    <div class="context">${item.visitName} → ${item.formName}</div>
-    <div class="reason">⚠ ${item.reason}</div>
-    ${item.suspectedTrap ? `<div class="trap">🪤 ${item.suspectedTrap}</div>` : ''}
-    ${item.evidence.length > 0 ? `<div class="evidence">${item.evidence.join('<br>')}</div>` : ''}
+    <div class="context">${esc(item.visitName)} → ${esc(item.formName)}</div>
+    <div class="reason">⚠ ${esc(item.reason)}</div>
+    ${item.suspectedTrap ? `<div class="trap">🪤 ${esc(item.suspectedTrap)}</div>` : ''}
+    ${item.evidence.length > 0 ? `<div class="evidence">${item.evidence.map(esc).join('<br>')}</div>` : ''}
+    ${radius}
     <div class="btn-group">
       <button class="btn btn-sm btn-primary" data-action="approve" data-key="${item.key}">✓ Approve</button>
       <button class="btn btn-sm btn-warning" data-action="override" data-key="${item.key}">✎ Override</button>
-      <button class="btn btn-sm" data-action="skip" data-key="${item.key}">⊘ Skip</button>
+      <button class="btn btn-sm" data-action="skip" data-key="${item.key}">${skipLabel}</button>
     </div>
+    <input data-role="note" placeholder="Note (recorded in the audit trail)"
+           style="width:100%;margin-top:6px;padding:4px;font-size:11px;box-sizing:border-box;">
   `;
 
   // Action handlers.
@@ -288,7 +317,9 @@ function renderEscalationItem(item: EscalationItem): void {
         return;
       }
 
-      sendDecision(key, { action, note: `human ${action}` });
+      const noteInput = el.querySelector('[data-role="note"]') as HTMLInputElement | null;
+      const note = noteInput?.value.trim();
+      sendDecision(key, { action, note: note || `human ${action}` });
       el.remove();
       escalationQueue = escalationQueue.filter((i) => i.key !== key);
       updateQueueBadge();
@@ -466,3 +497,136 @@ function logEvent(event: string, detail: string): void {
     // Service worker not ready yet -- that's fine.
   }
 })();
+
+
+// ---------------------------------------------------------------------------
+// Reconcile summary (pre-flight): what is already there.
+// ---------------------------------------------------------------------------
+
+function esc(v: string): string {
+  const d = document.createElement('div');
+  d.textContent = v;
+  return d.innerHTML;
+}
+
+function renderReconcileSummary(summary: TreeSummary, deepAvailable: boolean): void {
+  const card = $('reconcile-card')!;
+  const body = $('reconcile-summary')!;
+  card.classList.remove('hidden');
+
+  const toBuild = summary.formAppearancesToCreate.length;
+  const rows: string[] = [
+    `<div><strong>${summary.visitsPresent} of ${summary.visitsWanted}</strong> visits already exist.</div>`,
+    `<div><strong>${summary.formAppearancesPresent} of ${summary.formAppearancesWanted}</strong> form appearances present.</div>`,
+    `<div><strong>${toBuild}</strong> form${toBuild === 1 ? '' : 's'} to create.</div>`,
+  ];
+
+  if (summary.visitsToCreate.length > 0) {
+    rows.push(
+      `<div style="font-size:11px;color:var(--text-muted);margin-top:6px;">` +
+      `Visits to create: ${summary.visitsToCreate.map(esc).join(', ')}</div>`,
+    );
+  }
+
+  if (!deepAvailable) {
+    // Stating the limitation is the point. Silently degrading here would mean
+    // a re-run cannot tell an already-built field from a missing one.
+    rows.push(
+      `<div class="trap" style="margin-top:8px;">⚠ <strong>Field-level reconciliation unavailable.</strong> ` +
+      `This platform's form contents could not be enumerated, so a re-run cannot ` +
+      `detect fields that already exist and may create duplicates.</div>`,
+    );
+  }
+
+  body.innerHTML = rows.join('');
+}
+
+// ---------------------------------------------------------------------------
+// Parked review: the non-blocking pile, cleared in one sitting at the end.
+// ---------------------------------------------------------------------------
+
+function renderParkedReview(items: EscalationItem[]): void {
+  const status = $('queue-status')!;
+  status.className = 'status-banner warning';
+  status.textContent =
+    `Build finished. ${items.length} item${items.length === 1 ? '' : 's'} parked for review — ` +
+    `nothing else is waiting on you.`;
+  for (const item of items) {
+    if (!escalationQueue.some((q) => q.key === item.key)) {
+      escalationQueue.push(item);
+      renderEscalationItem(item);
+    }
+  }
+  updateQueueBadge();
+}
+
+// ---------------------------------------------------------------------------
+// Rung 2 API key. Stored locally; never bundled, never sent anywhere but the
+// Anthropic API.
+// ---------------------------------------------------------------------------
+
+async function refreshKeyStatus(justChanged = false): Promise<void> {
+  const el = $('key-status');
+  if (!el) return;
+  const stored = await chrome.storage.local.get('anthropicApiKey');
+  const has = typeof stored?.anthropicApiKey === 'string' && stored.anthropicApiKey.length > 0;
+  el.textContent = has
+    ? (justChanged ? 'Key saved. AI assist enabled.' : 'Key configured. AI assist enabled.')
+    : 'No key. Ambiguous types will be escalated instead.';
+}
+
+$('save-key')?.addEventListener('click', async () => {
+  const input = $('api-key') as HTMLInputElement | null;
+  if (!input) return;
+  const value = input.value.trim();
+  if (!value) return;
+  await chrome.storage.local.set({ anthropicApiKey: value });
+  input.value = '';
+  await refreshKeyStatus(true);
+});
+
+$('clear-key')?.addEventListener('click', async () => {
+  await chrome.storage.local.remove('anthropicApiKey');
+  await refreshKeyStatus(true);
+});
+
+void refreshKeyStatus();
+
+// ---------------------------------------------------------------------------
+// Journal export: the provenance record.
+// ---------------------------------------------------------------------------
+
+function download(filename: string, content: string, mime: string): void {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function fetchJournal(): Promise<JournalExport | null> {
+  const res = await chrome.runtime.sendMessage({ type: 'GET_JOURNAL' });
+  if (!res?.ok) {
+    const status = $('report-status');
+    if (status) {
+      status.className = 'status-banner idle';
+      status.textContent = res?.error ?? 'No journal yet — start a run first.';
+    }
+    return null;
+  }
+  return res as JournalExport;
+}
+
+$('export-jsonl')?.addEventListener('click', async () => {
+  const j = await fetchJournal();
+  if (!j) return;
+  download(`build-${j.runId}.jsonl`, j.jsonl, 'application/x-ndjson');
+});
+
+$('export-report')?.addEventListener('click', async () => {
+  const j = await fetchJournal();
+  if (!j) return;
+  download(`build-report-${j.runId}.html`, j.html, 'text/html');
+});

@@ -14,6 +14,7 @@ import type { CanonicalType, CapabilityReport, BindingRecord, ContractOpId } fro
 import type { Observation, Diff } from '../perceive/core';
 import type { ActResult } from '../act/primitives';
 import type { Plan, LinearItem } from '../plan/compiler';
+import type { TreeSummary } from '../engine/reconcile';
 import type { Verdict, VerdictResult } from '../verify/verify';
 import type { ItemState, RunState } from '../engine/state-machine';
 
@@ -189,6 +190,36 @@ export interface EscalationItem {
   blastRadius?: { fields: number; forms: number };
 }
 
+/** Shallow-pass reconcile result, shown on the pre-flight screen so the human
+ *  authorises the run from a concrete statement of the work rather than an
+ *  empty progress bar. */
+export interface ReconcileSummaryMsg {
+  type: 'RECONCILE_SUMMARY';
+  summary: TreeSummary;
+  /** When false, field-level reconciliation is unavailable on this platform
+   *  and a re-run cannot tell an already-built field from a missing one. */
+  deepReconcileAvailable: boolean;
+}
+
+/** The parked (non-blocking) escalations, delivered at the end of the run to
+ *  be cleared in one review session. */
+export interface ParkedReviewMsg {
+  type: 'PARKED_REVIEW';
+  items: EscalationItem[];
+}
+
+/** Side panel -> background: fetch the provenance journal for export. */
+export interface GetJournalMsg {
+  type: 'GET_JOURNAL';
+}
+
+export interface JournalExport {
+  runId: string;
+  jsonl: string;
+  html: string;
+  recordCount: number;
+}
+
 /** The run is complete. */
 export interface RunCompleteMsg {
   type: 'RUN_COMPLETE';
@@ -225,6 +256,7 @@ export type ContentScriptMsg = PerceiveObserveMsg | ActExecuteMsg;
 
 /** All messages the side panel can send to the service worker. */
 export type SidePanelToBackgroundMsg =
+  | GetJournalMsg
   | StartRunMsg
   | PauseRunMsg
   | ResumeRunMsg
@@ -234,6 +266,8 @@ export type SidePanelToBackgroundMsg =
 
 /** All messages the service worker can broadcast to the side panel. */
 export type BackgroundToSidePanelMsg =
+  | ReconcileSummaryMsg
+  | ParkedReviewMsg
   | PreflightReportMsg
   | RunProgressMsg
   | EscalationMsg

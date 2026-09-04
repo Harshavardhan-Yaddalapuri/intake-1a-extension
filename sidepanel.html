@@ -258,6 +258,29 @@
       <div id="ir-summary" class="hidden" style="margin-top:8px;"></div>
     </div>
 
+    <div class="card hidden" id="reconcile-card">
+      <h3>What is already there</h3>
+      <div id="reconcile-summary"></div>
+    </div>
+
+    <details class="card" id="llm-config">
+      <summary style="cursor:pointer;font-weight:600;">Optional: AI-assisted type mapping</summary>
+      <p style="font-size:11px;color:var(--text-muted);margin:8px 0;">
+        Used only when structural matching and probing both fail to identify a
+        control. Its suggestion is always confirmed by placing the control and
+        reading back what appeared, so a wrong answer cannot reach the study.
+        With no key the build still completes — ambiguous types go to the review
+        queue instead.
+      </p>
+      <input type="password" id="api-key" placeholder="Anthropic API key (stored locally, never bundled)"
+             style="width:100%;padding:6px;font-size:11px;box-sizing:border-box;">
+      <div style="margin-top:6px;display:flex;gap:6px;align-items:center;">
+        <button class="btn btn-sm" id="save-key">Save</button>
+        <button class="btn btn-sm" id="clear-key">Clear</button>
+        <span id="key-status" style="font-size:11px;color:var(--text-muted);"></span>
+      </div>
+    </details>
+
     <div class="card hidden" id="capability-card">
       <h3>Platform Capability Report</h3>
       <div id="capability-report"></div>
@@ -302,6 +325,8 @@
     </div>
 
     <div class="btn-group">
+      <button class="btn btn-sm" id="export-jsonl">📥 Audit trail (JSONL)</button>
+      <button class="btn btn-sm" id="export-report">📄 Build report (HTML)</button>
       <button class="btn btn-sm hidden" id="export-btn">📥 Export Runtime Log</button>
     </div>
   </section>

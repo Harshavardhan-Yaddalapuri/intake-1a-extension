@@ -19,6 +19,7 @@ import type {
   RunStateSnapshot,
 } from './shared/messages';
 import { Orchestrator, type OrchestratorCallbacks } from './engine/orchestrator';
+import { toJsonl, toHtmlReport } from './engine/journal';
 
 // ---------------------------------------------------------------------------
 // Orchestrator state.
@@ -34,9 +35,13 @@ function broadcast(message: Record<string, unknown>): void {
 }
 
 /** Build orchestrator callbacks that broadcast to the side panel. */
+/** Study title, captured at pre-flight for the exported report header. */
+let currentStudyTitle = 'study';
+
 function makeCallbacks(): OrchestratorCallbacks {
   return {
     onPreflightReport(report, planSummary) {
+      currentStudyTitle = planSummary.studyTitle;
       broadcast({
         type: 'PREFLIGHT_REPORT',
         report,
@@ -54,6 +59,19 @@ function makeCallbacks(): OrchestratorCallbacks {
         type: 'ESCALATION',
         item,
       } satisfies EscalationMsg);
+    },
+    onReconcileSummary(summary, deepAvailable) {
+      broadcast({
+        type: 'RECONCILE_SUMMARY',
+        summary,
+        deepReconcileAvailable: deepAvailable,
+      });
+    },
+    onParkedReview(items) {
+      broadcast({
+        type: 'PARKED_REVIEW',
+        items,
+      });
     },
     onComplete(summary) {
       broadcast({
@@ -171,6 +189,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         escalationQueue: orchestrator?.getEscalationQueue() ?? [],
       };
       sendResponse(snapshot);
+      return false;
+    }
+
+    case 'GET_JOURNAL': {
+      if (!orchestrator) {
+        sendResponse({ ok: false, error: 'no run has started' });
+        return false;
+      }
+      const journal = orchestrator.getJournal();
+      const records = journal.records();
+      sendResponse({
+        ok: true,
+        runId: records[0]?.run_id ?? 'unknown',
+        jsonl: toJsonl(records),
+        html: toHtmlReport(journal, { studyTitle: currentStudyTitle }),
+        recordCount: records.length,
+      });
       return false;
     }
 
