@@ -88,6 +88,7 @@ export type ContractOpId =
   | 'form.create'
   | 'form.open'
   | 'form.exists'
+  | 'form.list_fields'
   | 'field_palette.open'
   | 'field.add'
   | 'field.set_label'
@@ -107,6 +108,7 @@ export const CONTRACT_OPS: readonly ContractOpId[] = [
   'form.create',
   'form.open',
   'form.exists',
+  'form.list_fields',
   'field_palette.open',
   'field.add',
   'field.set_label',
@@ -155,6 +157,31 @@ export interface FormOpenArgs {
 export interface FormExistsArgs {
   op: 'form.exists';
   form_label: string;
+}
+
+/** Enumerate the controls inside the currently open form.
+ *
+ *  This is the operation reconciliation is built on: it answers "what is
+ *  actually in this form right now", which is what makes a re-run a no-op and
+ *  what makes the reuse-versus-rebuild question empirical rather than assumed.
+ *  It reads only; it never mutates. */
+export interface FormListFieldsArgs {
+  op: 'form.list_fields';
+}
+
+/** One control observed inside an open form. A projection of
+ *  ObservationElement onto the attributes the input file cares about. */
+export interface ObservedField {
+  /** Accessible name, as observed. Callers normalise before comparing. */
+  label: string;
+  /** ARIA role, which is what distinguishes near-identical control types. */
+  role: string;
+  required?: boolean;
+  range?: { min?: number; max?: number; step?: number };
+  /** Option vocabulary, empty for controls that have none. */
+  options: string[];
+  /** ACT handle, for follow-up interaction with this specific control. */
+  handle: string;
 }
 
 export interface FieldPaletteOpenArgs {
@@ -219,6 +246,7 @@ export type ContractOpArgs =
   | FormCreateArgs
   | FormOpenArgs
   | FormExistsArgs
+  | FormListFieldsArgs
   | FieldPaletteOpenArgs
   | FieldAddArgs
   | FieldSetLabelArgs

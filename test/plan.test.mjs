@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseIRJson } from '../dist/plan-ir.mjs';
 import { compilePlan, linearize, microOrder } from '../dist/plan-compiler.mjs';
+import { CONTRACT_OPS } from '../dist/contract.mjs';
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -219,4 +220,19 @@ test('linearize: deterministic across two compilations', () => {
   const plan1 = compilePlan(parseIRJson(text));
   const plan2 = compilePlan(parseIRJson(text));
   assert.deepEqual(linearize(plan1), linearize(plan2));
+});
+
+// ---------------------------------------------------------------------------
+// form.list_fields: the operation reconciliation is built on.
+// ---------------------------------------------------------------------------
+
+test('contract includes form.list_fields', () => {
+  assert.ok(
+    CONTRACT_OPS.includes('form.list_fields'),
+    'reconciliation requires an operation that enumerates the fields in an open form',
+  );
+});
+
+test('contract has 18 operations', () => {
+  assert.equal(CONTRACT_OPS.length, 18);
 });
