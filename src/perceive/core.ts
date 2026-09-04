@@ -36,6 +36,10 @@ export interface ElementState {
   disabled?: boolean;
   expanded?: boolean;
   value?: string;
+  /** aria-required, falling back to the native `required` attribute.
+   *  Scoring criterion 7 read-back. Absent when the platform expresses
+   *  neither, which is not the same as false. */
+  required?: boolean;
 }
 
 export interface ObservationElement {
@@ -288,6 +292,16 @@ function currentValue(el: Element): string | undefined {
   return undefined;
 }
 
+/** Required state. ARIA wins over the native attribute, per ARIA in HTML:
+ *  an explicit aria-required="false" is an author override of `required`. */
+function isRequired(el: Element): boolean | undefined {
+  const aria = el.getAttribute('aria-required');
+  if (aria === 'true') return true;
+  if (aria === 'false') return false;
+  if (el.hasAttribute('required')) return true;
+  return undefined;
+}
+
 export function computeState(el: Element): ElementState {
   const state: ElementState = {};
   const checked = isChecked(el);
@@ -295,6 +309,8 @@ export function computeState(el: Element): ElementState {
   if (isDisabled(el)) state.disabled = true;
   const expanded = isExpanded(el);
   if (expanded !== undefined) state.expanded = expanded;
+  const required = isRequired(el);
+  if (required !== undefined) state.required = required;
   const value = currentValue(el);
   if (value !== undefined) state.value = value;
   return state;

@@ -5,6 +5,7 @@ import {
   computeAccname,
   computeRole,
   computeOptions,
+  computeState,
   observe,
   diffObservations,
   structuralPath,
@@ -193,4 +194,38 @@ test('observe: label-uncertain flag set for placeholder/title/absent names', () 
   const unnamed = obs.elements.find((e) => e.name === '');
   assert.ok(unnamed);
   assert.equal(unnamed.labelUncertain, true);
+});
+
+// ---------------------------------------------------------------------------
+// Required state (scoring criterion 7).
+// ---------------------------------------------------------------------------
+
+test('state: aria-required="true" sets required', () => {
+  const d = doc(`<input id="x" aria-required="true" />`);
+  assert.equal(computeState(el(d, '#x')).required, true);
+});
+
+test('state: aria-required="false" sets required false', () => {
+  const d = doc(`<input id="x" aria-required="false" />`);
+  assert.equal(computeState(el(d, '#x')).required, false);
+});
+
+test('state: native required attribute sets required', () => {
+  const d = doc(`<input id="x" required />`);
+  assert.equal(computeState(el(d, '#x')).required, true);
+});
+
+test('state: aria-required wins over native attribute', () => {
+  const d = doc(`<input id="x" required aria-required="false" />`);
+  assert.equal(computeState(el(d, '#x')).required, false);
+});
+
+test('state: required is absent when neither signal is present', () => {
+  const d = doc(`<input id="x" />`);
+  assert.equal(computeState(el(d, '#x')).required, undefined);
+});
+
+test('state: required works on non-input roles', () => {
+  const d = doc(`<div id="x" role="combobox" aria-required="true"></div>`);
+  assert.equal(computeState(el(d, '#x')).required, true);
 });
