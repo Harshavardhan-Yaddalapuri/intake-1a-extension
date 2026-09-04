@@ -66,6 +66,21 @@ import {
 } from '../bind/rung0';
 import { ProbeRunner } from './probe-runner';
 import { analyzeCommit } from '../bind/rung1';
+import {
+  LEXICAL_HINTS,
+  enumerateActionable,
+  enumerateByRoles,
+  rankCandidates,
+} from '../bind/ranking';
+import { rankCommitCandidates } from '../bind/rung0';
+
+/** Does this name read like a working-copy / persisted-state indicator?
+ *  Weak corroboration only -- analyzeCommit's structural before/after
+ *  comparison is the authoritative signal. Word list lives in ranking.ts. */
+function matchesStatusHint(name: string): boolean {
+  const n = name.toLowerCase();
+  return LEXICAL_HINTS.status.some((w) => n.includes(w));
+}
 
 // ---------------------------------------------------------------------------
 // Orchestrator.
@@ -782,15 +797,8 @@ export class Orchestrator {
     // Click the "add visit" button.
     if (createBinding.recipe.length > 0) {
       const { observation } = await this.driver.perceive();
-      const addBtn = observation.elements.find(
-        (e) => e.role === 'button' && (
-          (e.name.toLowerCase().includes('add') && e.name.toLowerCase().includes('visit')) ||
-          e.name === '+' ||
-          e.name.toLowerCase().includes('add') ||
-          e.name.toLowerCase().includes('phase') ||
-          e.name.toLowerCase().includes('new')
-        ),
-      );
+      const addPool = enumerateActionable(observation);
+      const addBtn = rankCandidates(addPool, { hint: 'visit_create' })[0]?.el;
       if (addBtn) {
         await this.driver.click(addBtn.handle);
         await this.sleep(300);
@@ -799,38 +807,28 @@ export class Orchestrator {
 
     // Fill in the visit name.
     const { observation: formObs } = await this.driver.perceive();
-    const nameInputs = formObs.elements.filter(
-      (e) => e.role === 'textbox' && (
-        e.name.toLowerCase().includes('name') || e.name.toLowerCase().includes('visit') ||
-        e.name.toLowerCase().includes('phase')
-      ),
-    );
-    if (nameInputs.length > 0) {
-      await this.driver.setValue(nameInputs[0].handle, visit.name);
+    const textPool = enumerateByRoles(formObs, ['textbox', 'searchbox']);
+    const nameBox = rankCandidates(textPool, { hint: 'name_input' })[0]?.el;
+    if (nameBox) {
+      await this.driver.setValue(nameBox.handle, visit.name);
     }
 
-    // Fill in visit window days.
-    const startInputs = formObs.elements.filter(
-      (e) => e.role === 'textbox' && (e.name.toLowerCase().includes('start') || e.name.toLowerCase().includes('window')),
-    );
-    const endInputs = formObs.elements.filter(
-      (e) => e.role === 'textbox' && (e.name.toLowerCase().includes('end') || e.name.toLowerCase().includes('window')),
-    );
-    if (startInputs.length > 0) {
-      await this.driver.setValue(startInputs[0].handle, String(visit.window_start_day));
+    // Fill in the visit window. Both bounds are ranked over the same pool and
+    // the top two distinct candidates are used, so a platform naming them
+    // anything at all still gets values written; the read-back confirms.
+    const startBox = rankCandidates(textPool, { hint: 'window_start' })[0]?.el;
+    const endCandidates = rankCandidates(textPool, { hint: 'window_end' });
+    const endBox = (endCandidates.find((c) => c.el.handle !== startBox?.handle) ?? endCandidates[0])?.el;
+    if (startBox && startBox.handle !== nameBox?.handle) {
+      await this.driver.setValue(startBox.handle, String(visit.window_start_day));
     }
-    if (endInputs.length > 0) {
-      await this.driver.setValue(endInputs[0].handle, String(visit.window_end_day));
+    if (endBox && endBox.handle !== nameBox?.handle && endBox.handle !== startBox?.handle) {
+      await this.driver.setValue(endBox.handle, String(visit.window_end_day));
     }
 
     // Click save.
     const { observation: saveObs } = await this.driver.perceive();
-    const saveBtn = saveObs.elements.find(
-      (e) => e.role === 'button' && (
-        e.name.toLowerCase().includes('save') || e.name.toLowerCase().includes('create') ||
-        e.name.toLowerCase().includes('freeze')
-      ),
-    );
+    const saveBtn = rankCandidates(enumerateActionable(saveObs), { hint: 'commit' })[0]?.el;
     if (saveBtn) {
       await this.driver.click(saveBtn.handle, false);
       await this.sleep(500);
@@ -894,17 +892,10 @@ export class Orchestrator {
   }
 
   private async createForm(form: IrForm): Promise<void> {
-    // Click "new form" / "add source document" / "+ New Record Sheet" button.
+    // The control that creates a source document. Ranked, never gated: every
+    // platform has its own word for it and the previous list was a guess.
     const { observation } = await this.driver.perceive();
-    const newBtn = observation.elements.find(
-      (e) => e.role === 'button' && (
-        e.name.toLowerCase().includes('new') ||
-        e.name.toLowerCase().includes('add') ||
-        e.name.toLowerCase().includes('sheet') ||
-        e.name.toLowerCase().includes('document') ||
-        e.name === '+'
-      ),
-    );
+    const newBtn = rankCandidates(enumerateActionable(observation), { hint: 'form_create' })[0]?.el;
     if (newBtn) {
       await this.driver.click(newBtn.handle);
       await this.sleep(300);
@@ -912,12 +903,10 @@ export class Orchestrator {
 
     // Fill in the form name.
     const { observation: formObs } = await this.driver.perceive();
-    const nameInputs = formObs.elements.filter(
-      (e) => e.role === 'textbox' && (
-        e.name.toLowerCase().includes('name') || e.name.toLowerCase().includes('document') ||
-        e.name.toLowerCase().includes('sheet')
-      ),
-    );
+    const formTextPool = enumerateByRoles(formObs, ['textbox', 'searchbox']);
+    const nameInputs = rankCandidates(formTextPool, { hint: 'name_input' })
+      .slice(0, 1)
+      .map((r) => r.el);
     if (nameInputs.length > 0) {
       await this.driver.setValue(nameInputs[0].handle, form.name);
     }
@@ -926,7 +915,7 @@ export class Orchestrator {
     if (form.repeating) {
       const toggles = formObs.elements.filter(
         (e) => (e.role === 'checkbox' || e.role === 'switch') &&
-          e.name.toLowerCase().includes('repeat'),
+          rankCandidates([e], { hint: 'repeating' })[0].signals.some((sg) => sg.name === 'lexical'),
       );
       if (toggles.length > 0 && !toggles[0].state.checked) {
         await this.driver.check(toggles[0].handle, true);
@@ -935,12 +924,7 @@ export class Orchestrator {
 
     // Click create/save.
     const { observation: saveObs } = await this.driver.perceive();
-    const createBtn = saveObs.elements.find(
-      (e) => e.role === 'button' && (
-        e.name.toLowerCase().includes('create') || e.name.toLowerCase().includes('save') ||
-        e.name.toLowerCase().includes('freeze')
-      ),
-    );
+    const createBtn = rankCandidates(enumerateActionable(saveObs), { hint: 'commit' })[0]?.el;
     if (createBtn) {
       await this.driver.click(createBtn.handle, false);
       await this.sleep(500);
@@ -961,21 +945,20 @@ export class Orchestrator {
       if (ok) {
         await this.sleep(400);
         const post = await this.driver.perceiveAfterSettle(300);
-        const hasUnsaved = post.observation.elements.some((e) => {
-          const n = e.name.toLowerCase();
-          return n.includes('unsaved') || n.includes('dirty') || n.includes('unfrozen');
-        });
+        // Whether a working-copy indicator is still showing. Word list lives
+        // in ranking.ts; the authoritative signal is analyzeCommit's structural
+        // before/after comparison, which ran above.
+        const hasUnsaved = post.observation.elements.some(
+          (e) => e.name.length > 0 && matchesStatusHint(e.name),
+        );
         if (!hasUnsaved) return;
       }
     }
 
-    // Fallback: search for Save / Freeze / Commit button (avoiding Save As Template / Bank It traps)
-    const saveButtons = observation.elements.filter((e) => {
-      if (e.role !== 'button') return false;
-      const n = e.name.toLowerCase();
-      if (n.includes('template') || n.includes('bank')) return false;
-      return n.includes('save') || n.includes('freeze') || n.includes('commit') || n === 'save';
-    });
+    // Fallback: work down the ranked commit trial order. Nothing is excluded
+    // by name -- the decoy is caught by analyzeCommit observing that the
+    // working copy did not change, not by recognising its label.
+    const saveButtons = rankCommitCandidates(observation).map((r) => r.el);
 
     if (saveButtons.length > 0) {
       await this.driver.click(saveButtons[0].handle, false);

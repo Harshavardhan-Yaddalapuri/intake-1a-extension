@@ -27,6 +27,11 @@ const GUARDED = [
   'src/bind/rung0.ts',
   'src/bind/rung1.ts',
   'src/engine/probe-runner.ts',
+  // The orchestrator does the actual driving -- navigating visits, creating
+  // forms, confirming saves. A lexical gate here fails the run on an unseen
+  // platform regardless of how well the binding layer generalises, so it is
+  // guarded on the same terms.
+  'src/engine/orchestrator.ts',
 ];
 
 /** Strip comments so commentary about the defect is not mistaken for it. */

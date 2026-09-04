@@ -38,7 +38,10 @@ export type HintKey =
   | 'decimals'
   | 'formula'
   | 'date_options'
-  | 'template';
+  | 'template'
+  | 'window_start'
+  | 'window_end'
+  | 'repeating';
 
 /** Weak lexical priors. A word here may raise a candidate's rank. A word here
  *  may NEVER remove a candidate from the pool. Words are deliberately generic
@@ -66,6 +69,9 @@ export const LEXICAL_HINTS: Record<HintKey, readonly string[]> = {
   formula: ['formula', 'expression', 'calculation', 'derived'],
   date_options: ['allow past', 'allow future', 'picker options', 'date range'],
   template: ['template', 'banked', 'bank it', 'library', 'reusable'],
+  window_start: ['start', 'from', 'begin', 'day 1', 'lower', 'earliest', 'window'],
+  window_end: ['end', 'to', 'until', 'finish', 'upper', 'latest', 'window'],
+  repeating: ['repeat', 'recurring', 'multiple', 'many'],
 };
 
 /** Signal weights. Structural evidence outranks vocabulary, deliberately:
