@@ -236,3 +236,17 @@ test('contract includes form.list_fields', () => {
 test('contract has 18 operations', () => {
   assert.equal(CONTRACT_OPS.length, 18);
 });
+
+test('every linear item carries its canonical type and human-readable names', () => {
+  const plan = compilePlan(
+    parseIRJson(JSON.stringify(syntheticIR([
+      field('Age', 'integer', { min: 0, max: 120 }),
+      field('Sex', 'single_select', { options: [{ code: 'M', label: 'Male' }] }),
+    ]))),
+  );
+  for (const item of linearize(plan)) {
+    assert.ok(item.canonical_type, `item ${item.field_id} has no canonical_type`);
+    assert.ok(item.visit_name, `item ${item.field_id} has no visit_name`);
+    assert.ok(item.form_name, `item ${item.field_id} has no form_name`);
+  }
+});

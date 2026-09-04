@@ -369,6 +369,13 @@ export interface LinearItem {
   kind: MicroStepKind;
   op: ContractOpId;
   description: string;
+  /** Canonical type of the field this step belongs to. Escalations group on
+   *  it, so one type decision settles every field of that type — 13 decisions
+   *  at worst rather than 195. */
+  canonical_type: CanonicalType;
+  /** Human-readable names, for escalation cards and journal provenance. */
+  visit_name: string;
+  form_name: string;
 }
 
 /**
@@ -392,6 +399,9 @@ export function linearize(plan: Plan): LinearItem[] {
             kind: step.kind,
             op: step.op,
             description: step.description,
+            canonical_type: field.canonical_type,
+            visit_name: visit.name,
+            form_name: form.name,
           });
         }
       }
@@ -406,6 +416,10 @@ export function linearize(plan: Plan): LinearItem[] {
           description:
             `skip logic: show "${skip.field_label}" when "${skip.controlling_label}" ` +
             `= "${skip.rule.equals_value}"`,
+          canonical_type:
+            form.fields.find((f) => f.field_id === skip.field_id)?.canonical_type ?? 'text',
+          visit_name: visit.name,
+          form_name: form.name,
         });
       }
     }
