@@ -39,6 +39,7 @@ export type MicroStepKind =
   | 'set_label'
   | 'set_range'
   | 'type_refinement'
+  | 'verify_range'
   | 'set_coded_values'
   | 'set_required'
   | 'set_skip_logic';
@@ -52,6 +53,9 @@ export const MICRO_STEP_OP: Record<MicroStepKind, ContractOpId> = {
   set_coded_values: 'field.set_coded_values',
   set_required: 'field.set_required',
   set_skip_logic: 'field.set_skip_logic',
+  // Re-reads the range through the same binding that set it; the orchestrator
+  // distinguishes the two by step kind.
+  verify_range: 'field.set_range',
 };
 
 /**
@@ -64,12 +68,25 @@ export const MICRO_STEP_OP: Record<MicroStepKind, ContractOpId> = {
  * by VERIFY: after type finalization, re-read range; missing range after type
  * set is AMBIGUOUS evidence of silent discard and escalates.
  */
+/**
+ * Micro-step order within one field.
+ *
+ * The type is settled BEFORE the range, never after. Platforms commonly
+ * discard a value the current type cannot hold when the type changes, and they
+ * do it silently -- so setting a range first and refining the type afterwards
+ * loses the range with nothing to say it happened. This order was previously
+ * reversed, which is exactly the trap the brief describes.
+ *
+ * A field carrying a range also gets a verify_range step LAST, after every
+ * step that could touch the type, because the only way to know the range
+ * survived is to read it back once nothing else will disturb it.
+ */
 export function microOrder(field: IrField): MicroStepKind[] {
-  const steps: MicroStepKind[] = ['add', 'set_label'];
+  const steps: MicroStepKind[] = ['add', 'set_label', 'type_refinement'];
   if (field.range) steps.push('set_range');
-  steps.push('type_refinement');
   if (field.options) steps.push('set_coded_values');
   steps.push('set_required');
+  if (field.range) steps.push('verify_range');
   return steps;
 }
 
@@ -321,6 +338,8 @@ function describeStep(kind: MicroStepKind, field: IrField): string {
       return `set required=${field.required}`;
     case 'set_skip_logic':
       return 'set skip logic (form end)';
+    case 'verify_range':
+      return 're-read range after the type is final';
   }
 }
 

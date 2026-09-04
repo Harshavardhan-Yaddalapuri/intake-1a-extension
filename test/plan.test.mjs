@@ -158,7 +158,12 @@ test('topo sort: unknown controlling label is an error, field built without skip
 // Micro-ordering.
 // ---------------------------------------------------------------------------
 
-test('micro-order: add -> label -> range -> type -> coded -> required', () => {
+// Was: add -> label -> range -> type -> coded -> required. That order set the
+// range BEFORE refining the type, and a platform that discards values the new
+// type cannot hold does so silently — so the range vanished with nothing to
+// report it. Type is now settled first, and a verify_range read-back closes
+// the field.
+test('micro-order: add -> label -> type -> range -> coded -> required -> verify', () => {
   const ir = parseIRJson(
     JSON.stringify(
       syntheticIR([
@@ -175,10 +180,11 @@ test('micro-order: add -> label -> range -> type -> coded -> required', () => {
   assert.deepEqual(microOrder(f), [
     'add',
     'set_label',
-    'set_range',
     'type_refinement',
+    'set_range',
     'set_coded_values',
     'set_required',
+    'verify_range',
   ]);
 });
 
@@ -248,5 +254,46 @@ test('every linear item carries its canonical type and human-readable names', ()
     assert.ok(item.canonical_type, `item ${item.field_id} has no canonical_type`);
     assert.ok(item.visit_name, `item ${item.field_id} has no visit_name`);
     assert.ok(item.form_name, `item ${item.field_id} has no form_name`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Type-before-range ordering (the silent-discard trap).
+// ---------------------------------------------------------------------------
+
+test('the type is settled before the range is set', () => {
+  const order = microOrder({ label: 'HR', canonical_type: 'integer', required: false,
+                             range: { min: 30, max: 200, units: 'bpm' } });
+  assert.ok(
+    order.indexOf('type_refinement') < order.indexOf('set_range'),
+    'setting a range before refining the type loses it silently when the type changes',
+  );
+});
+
+test('a field with a range re-reads it after every step that could touch the type', () => {
+  const order = microOrder({ label: 'HR', canonical_type: 'integer', required: false,
+                             range: { min: 30, max: 200, units: 'bpm' } });
+  assert.equal(order[order.length - 1], 'verify_range', 'the read-back must come last');
+  assert.ok(order.lastIndexOf('verify_range') > order.lastIndexOf('set_range'));
+});
+
+test('a field with no range gets no range steps at all', () => {
+  const order = microOrder({ label: 'Name', canonical_type: 'text', required: false });
+  assert.ok(!order.includes('set_range'));
+  assert.ok(!order.includes('verify_range'));
+});
+
+test('set_range never precedes the add step for the same field', () => {
+  const plan = compilePlan(parseIRJson(JSON.stringify(syntheticIR([
+    field('HR', 'integer', { min: 30, max: 200, units: 'bpm' }),
+  ]))));
+  const seen = new Map();
+  for (const item of linearize(plan)) {
+    const prior = seen.get(item.field_id) ?? [];
+    if (item.kind === 'set_range') {
+      assert.ok(prior.includes('add'),
+        `set_range for "${item.label}" is ordered before the control exists`);
+    }
+    seen.set(item.field_id, [...prior, item.kind]);
   }
 });

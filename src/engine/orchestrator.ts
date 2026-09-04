@@ -598,8 +598,12 @@ export class Orchestrator {
         await this.executeFieldSetRange(item, itemKey, field);
         break;
       case 'type_refinement':
-        // Type refinement: re-verify that the type is correct after range setting.
+        // Settle the control's type BEFORE the range is written, so a type
+        // change cannot silently discard it.
         await this.executeTypeRefinement(item, itemKey, field, intent);
+        break;
+      case 'verify_range':
+        await this.executeVerifyRange(item, itemKey, field, intent);
         break;
       case 'set_coded_values':
         await this.executeFieldSetCodedValues(item, itemKey, field);
@@ -611,6 +615,50 @@ export class Orchestrator {
         await this.executeFieldSetSkipLogic(item, itemKey, field);
         break;
     }
+  }
+
+  /**
+   * Re-read a field's range once the type is final.
+   *
+   * The last step for any field carrying a range. Everything that could
+   * disturb the type has already run, so whatever the platform reports now is
+   * what the study will actually have. A range that has gone missing is the
+   * silent-discard trap and is parked for review rather than retried blindly —
+   * a blind retry would just set it again and lose it again.
+   */
+  private async executeVerifyRange(
+    item: LinearItem,
+    itemKey: string,
+    field: IrField,
+    intent: IntentRecord,
+  ): Promise<void> {
+    const { observation } = await this.driver.perceiveAfterSettle(200);
+    const verdict = compareIntent(observation, intent);
+
+    if (verdict.verdict === 'VERIFIED') {
+      await this.markVerified(itemKey, {
+        rung: 0,
+        evidence: [`range re-read after the type was final: ${verdict.reason}`],
+        reason: verdict.reason,
+      });
+      return;
+    }
+
+    await this.escalateItem(itemKey, 'verifying', {
+      key: itemKey,
+      fieldLabel: item.label,
+      formName: item.form_name,
+      visitName: item.visit_name,
+      canonicalType: item.canonical_type,
+      reason: verdict.reason,
+      suspectedTrap:
+        verdict.suspected_trap ??
+        'the range was set earlier but is absent now; the platform may have ' +
+        'discarded it when the control type was settled',
+      evidence: [verdict.reason],
+      verdict,
+      phase: 'verifying',
+    }, /* blocking */ false);
   }
 
   // -------------------------------------------------------------------------
