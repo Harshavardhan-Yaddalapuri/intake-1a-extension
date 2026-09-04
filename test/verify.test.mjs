@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { compareIntent, checkFirst } from '../dist/verify.mjs';
+import { elem, obs as mkObs, resetSeq } from './fixtures/obs.mjs';
 
 // ---------------------------------------------------------------------------
 // Helpers: build a minimal Observation from a list of {name, role, options}.
@@ -138,4 +139,173 @@ test('check-first: absent element is FAILED (build it)', () => {
 test('check-first: same name wrong role is AMBIGUOUS', () => {
   const r = checkFirst(obs([{ name: 'Subject Initials', role: 'checkbox' }]), intent());
   assert.equal(r.verdict, 'AMBIGUOUS');
+});
+
+// ---------------------------------------------------------------------------
+// Label normalisation.
+// ---------------------------------------------------------------------------
+
+const baseIntent = {
+  visit_id: 'v0',
+  form_id: 'v0.f0',
+  field_id: 'v0.f0.d0',
+  canonical_type: 'text',
+  label: 'Subject Initials',
+  required: false,
+};
+
+test('findByName tolerates a trailing required marker', () => {
+  resetSeq();
+  const o = mkObs([elem('textbox', 'Subject Initials *')]);
+  const v = compareIntent(o, baseIntent);
+  assert.equal(v.verdict, 'VERIFIED', v.reason);
+});
+
+test('findByName tolerates a "(required)" suffix', () => {
+  resetSeq();
+  const o = mkObs([elem('textbox', 'Subject Initials (required)')]);
+  assert.equal(compareIntent(o, baseIntent).verdict, 'VERIFIED');
+});
+
+test('findByName tolerates collapsed and padded whitespace', () => {
+  resetSeq();
+  const o = mkObs([elem('textbox', '  Subject   Initials  ')]);
+  assert.equal(compareIntent(o, baseIntent).verdict, 'VERIFIED');
+});
+
+test('findByName tolerates case differences', () => {
+  resetSeq();
+  const o = mkObs([elem('textbox', 'SUBJECT INITIALS')]);
+  assert.equal(compareIntent(o, baseIntent).verdict, 'VERIFIED');
+});
+
+test('findByName still reports a genuinely absent field as FAILED', () => {
+  resetSeq();
+  const o = mkObs([elem('textbox', 'Something Else Entirely')]);
+  assert.equal(compareIntent(o, baseIntent).verdict, 'FAILED');
+});
+
+test('an ambiguous normalised match escalates rather than guessing', () => {
+  resetSeq();
+  const o = mkObs([
+    elem('textbox', 'Subject Initials *'),
+    elem('textbox', 'subject initials'),
+  ]);
+  const v = compareIntent(o, baseIntent);
+  assert.equal(v.verdict, 'AMBIGUOUS');
+  assert.match(v.reason, /more than one/i);
+});
+
+test('an exact match is preferred over a normalised one', () => {
+  resetSeq();
+  const o = mkObs([
+    elem('checkbox', 'subject initials'),
+    elem('textbox', 'Subject Initials'),
+  ]);
+  // The exact match is a textbox and matches type `text`; the normalised-only
+  // candidate is a checkbox and would fail the role check.
+  assert.equal(compareIntent(o, baseIntent).verdict, 'VERIFIED');
+});
+
+// ---------------------------------------------------------------------------
+// Required comparison (scoring criterion 7).
+// ---------------------------------------------------------------------------
+
+test('required intent matched by required state is VERIFIED', () => {
+  resetSeq();
+  const o = mkObs([elem('textbox', 'Age', { state: { required: true } })]);
+  const v = compareIntent(o, { ...baseIntent, label: 'Age', required: true });
+  assert.equal(v.verdict, 'VERIFIED', v.reason);
+});
+
+test('required intent contradicted by observed state is AMBIGUOUS', () => {
+  resetSeq();
+  const o = mkObs([elem('textbox', 'Age', { state: { required: false } })]);
+  const v = compareIntent(o, { ...baseIntent, label: 'Age', required: true });
+  assert.equal(v.verdict, 'AMBIGUOUS');
+  assert.match(v.suspected_trap ?? '', /required/i);
+});
+
+test('optional intent contradicted by observed required is AMBIGUOUS', () => {
+  resetSeq();
+  const o = mkObs([elem('textbox', 'Age', { state: { required: true } })]);
+  const v = compareIntent(o, { ...baseIntent, label: 'Age', required: false });
+  assert.equal(v.verdict, 'AMBIGUOUS');
+});
+
+test('unobservable required state does not fail the comparison', () => {
+  resetSeq();
+  const o = mkObs([elem('textbox', 'Age', { state: {} })]);
+  const v = compareIntent(o, { ...baseIntent, label: 'Age', required: true });
+  assert.equal(v.verdict, 'VERIFIED', 'absence of evidence is not evidence of absence');
+});
+
+// ---------------------------------------------------------------------------
+// Range comparison (scoring criterion 9).
+// ---------------------------------------------------------------------------
+
+const rangeIntent = {
+  ...baseIntent,
+  label: 'Heart Rate',
+  canonical_type: 'integer',
+  range_units: { min: 30, max: 200, units: 'bpm' },
+};
+
+test('a matching observed range is VERIFIED', () => {
+  resetSeq();
+  const o = mkObs([elem('spinbutton', 'Heart Rate (bpm)', { state: { range: { min: 30, max: 200 } } })]);
+  const v = compareIntent(o, rangeIntent);
+  assert.equal(v.verdict, 'VERIFIED', v.reason);
+});
+
+test('a numeric control with NO observed range is AMBIGUOUS, not VERIFIED', () => {
+  resetSeq();
+  const o = mkObs([elem('spinbutton', 'Heart Rate (bpm)', { state: {} })]);
+  const v = compareIntent(o, rangeIntent);
+  assert.equal(v.verdict, 'AMBIGUOUS', 'this is the silent-discard trap');
+  assert.match(v.suspected_trap ?? '', /discard|type change/i);
+});
+
+test('a wrong observed range is AMBIGUOUS', () => {
+  resetSeq();
+  const o = mkObs([elem('spinbutton', 'Heart Rate (bpm)', { state: { range: { min: 0, max: 999 } } })]);
+  const v = compareIntent(o, rangeIntent);
+  assert.equal(v.verdict, 'AMBIGUOUS');
+  assert.match(v.reason, /30|200/);
+});
+
+test('missing units are AMBIGUOUS, not FAILED', () => {
+  resetSeq();
+  const o = mkObs([elem('spinbutton', 'Heart Rate', { state: { range: { min: 30, max: 200 } } })]);
+  const v = compareIntent(o, rangeIntent);
+  assert.equal(v.verdict, 'AMBIGUOUS');
+  assert.match(v.reason, /unit/i);
+});
+
+test('units found in the accessible name satisfy the unit check', () => {
+  resetSeq();
+  const o = mkObs([elem('spinbutton', 'Heart Rate bpm', { state: { range: { min: 30, max: 200 } } })]);
+  assert.equal(compareIntent(o, rangeIntent).verdict, 'VERIFIED');
+});
+
+test('a label never resolves against a longer neighbouring label', () => {
+  resetSeq();
+  const o = mkObs([elem('spinbutton', 'Heart Rate Variability (ms)', { state: { range: { min: 0, max: 300 } } })]);
+  const v = compareIntent(o, rangeIntent);
+  assert.equal(
+    v.verdict,
+    'FAILED',
+    'Heart Rate must not resolve against Heart Rate Variability — a field that ' +
+    'resolves to its neighbour is a field that never gets built',
+  );
+});
+
+test('a declared unit in the label is tolerated, an undeclared suffix is not', () => {
+  resetSeq();
+  const withUnit = mkObs([elem('spinbutton', 'Heart Rate (bpm)', { state: { range: { min: 30, max: 200 } } })]);
+  assert.equal(compareIntent(withUnit, rangeIntent).verdict, 'VERIFIED');
+
+  resetSeq();
+  const withJunk = mkObs([elem('spinbutton', 'Heart Rate Extended', { state: { range: { min: 30, max: 200 } } })]);
+  assert.equal(compareIntent(withJunk, rangeIntent).verdict, 'FAILED');
 });
