@@ -176,6 +176,17 @@ export interface EscalationItem {
   binding?: BindingRecord;
   /** What phase the escalation happened in. */
   phase: 'binding' | 'acting' | 'verifying';
+  /** Blocking escalations pause the run because it cannot proceed without an
+   *  answer (no commit control; an unresolved canonical type gating every
+   *  field of that type). Non-blocking ones are parked and reviewed at the
+   *  end, so a long build is not an interrupt-driven review session. */
+  blocking: boolean;
+  /** Stable key grouping items that share ONE decision, e.g. the canonical
+   *  type. Answering once settles every item in the group. */
+  groupKey?: string;
+  /** How many other items share this decision. A type mapping affecting 14
+   *  fields is one decision, not fourteen. */
+  blastRadius?: { fields: number; forms: number };
 }
 
 /** The run is complete. */

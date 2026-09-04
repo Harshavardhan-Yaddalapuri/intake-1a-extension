@@ -30,6 +30,7 @@ import { compilePlan, linearize } from '../plan/compiler';
 import { parseIRJson } from '../plan/ir';
 import type {
   BindingRecord,
+  BindingRung,
   CanonicalType,
   CapabilityReport,
   ContractOpId,
@@ -72,7 +73,15 @@ import {
   enumerateByRoles,
   rankCandidates,
 } from '../bind/ranking';
-import { rankCommitCandidates } from '../bind/rung0';
+import { rankCommitCandidates, readObservedFields, bindFormListFields } from '../bind/rung0';
+import { Journal, type IrSource } from './journal';
+import {
+  reconcileForm,
+  summariseTree,
+  normaliseLabel,
+  type FormReconcileResult,
+  type TreeSummary,
+} from './reconcile';
 
 /** Does this name read like a working-copy / persisted-state indicator?
  *  Weak corroboration only -- analyzeCommit's structural before/after
@@ -97,6 +106,12 @@ export interface OrchestratorCallbacks {
   onEscalation: (item: EscalationItem) => void;
   /** Called when the run completes. */
   onComplete: (summary: RunSummary) => void;
+  /** Called when the shallow reconcile pass completes, before execution, so
+   *  the human authorises the run from a concrete statement of the work. */
+  onReconcileSummary?: (summary: TreeSummary, deepAvailable: boolean) => void;
+  /** Called at the end of the run with the parked (non-blocking) escalations,
+   *  to be cleared in one review session. */
+  onParkedReview?: (items: EscalationItem[]) => void;
 }
 
 export class Orchestrator {
@@ -126,6 +141,20 @@ export class Orchestrator {
   private currentVisitId: string | null = null;
   private currentFormId: string | null = null;
 
+  /** Append-only provenance log. Every act writes one record. */
+  private journal: Journal;
+  /** Per-form reconcile result, populated when the form is opened. */
+  private formReconcile: Map<string, FormReconcileResult> = new Map();
+  /** Shallow-pass survey of the visit/form tree, from pre-flight. */
+  private treeSummary: TreeSummary | null = null;
+  /** Whether form.list_fields bound. When false, field-level reconciliation is
+   *  unavailable and the run must say so rather than silently degrading. */
+  private deepReconcileAvailable = false;
+  /** Non-blocking escalations, reviewed in one sitting at the end. */
+  private parked: EscalationItem[] = [];
+  /** One decision per group settles every item sharing that group key. */
+  private groupDecisions: Map<string, HumanDecision> = new Map();
+
   /** The IR data, keyed for quick lookup. */
   private irVisitMap: Map<string, IrVisit>;
   private irFormMap: Map<string, IrForm>;
@@ -143,6 +172,7 @@ export class Orchestrator {
     this.driver = new TabDriver(tabId);
     this.probeRunner = new ProbeRunner(this.driver);
     this.callbacks = callbacks;
+    this.journal = new Journal(`run-${Date.now()}`);
 
     // Build lookup maps from IR.
     this.irVisitMap = new Map(this.ir.visits.map((v) => [v.visit_id, v]));
@@ -200,7 +230,18 @@ export class Orchestrator {
     this.phase = 'executing';
     await this.executePlan();
 
-    // Phase 3: Done.
+    // Phase 3: clear the parked pile.
+    //
+    // Non-blocking escalations were set aside during the build so a 195-field
+    // run is not an interrupt-driven slog. They are reviewed here, in one
+    // sitting, before the run is called done.
+    if (this.parked.length > 0) {
+      this.phase = 'paused';
+      this.callbacks.onParkedReview?.(this.parked.slice());
+      await this.waitForResume();
+    }
+
+    // Phase 4: Done.
     this.phase = 'done';
     this.runState.status = 'done';
     await saveRunState(this.adapter, this.runState);
@@ -232,7 +273,24 @@ export class Orchestrator {
       pending.resolve(decision);
       this.escalationQueue.delete(key);
     }
+
+    // A decision on a grouped escalation settles every item in that group.
+    // 13 canonical types means at most 13 type decisions, never 195.
+    const resolved =
+      this.parked.find((p) => p.key === key) ?? null;
+    const groupKey = resolved?.groupKey;
+    if (groupKey) {
+      this.groupDecisions.set(groupKey, decision);
+      for (const [otherKey, waiter] of [...this.escalationQueue]) {
+        const other = this.parked.find((p) => p.key === otherKey);
+        if (other?.groupKey === groupKey) {
+          waiter.resolve(decision);
+          this.escalationQueue.delete(otherKey);
+        }
+      }
+    }
   }
+
 
   /** Get the current phase. */
   getPhase(): OrchestratorPhase { return this.phase; }
@@ -253,6 +311,9 @@ export class Orchestrator {
           visitName: visit?.name ?? item.visit_id,
           canonicalType: (field?.canonical_type ?? 'text') as CanonicalType,
           reason: item.escalation_reason ?? 'unknown',
+          // Reconstructed from the live queue: anything still waiting on a
+          // human by definition blocked the run.
+          blocking: true,
           evidence: [],
           phase: 'verifying',
         });
@@ -306,6 +367,23 @@ export class Orchestrator {
       }
     }
 
+    // Bind field enumeration, which reconciliation depends on. If it cannot
+    // bind, field-level reconciliation is genuinely unavailable and the run
+    // must SAY so rather than silently degrading -- a re-run would then be
+    // unable to tell an already-built field from a missing one.
+    const listBinding = bindFormListFields(observation);
+    if (listBinding) {
+      this.bindings['form.list_fields'] = listBinding;
+      allBindings['form.list_fields'] = listBinding;
+      this.deepReconcileAvailable = listBinding.status === 'bound';
+    }
+
+    // Shallow reconcile: walk the visit list and, for each visit that exists,
+    // the form names under it. Bounded by visit and form-appearance count, not
+    // field count, so the pre-flight screen gets a concrete work statement
+    // without paying to enumerate 195 fields before anything happens.
+    await this.runShallowReconcile();
+
     return {
       platform_origin: observation.url,
       generated_at: Date.now(),
@@ -313,6 +391,69 @@ export class Orchestrator {
       needs_human: needsHuman,
       unbindable,
     };
+  }
+
+  /**
+   * Survey the visit/form tree without descending into forms.
+   *
+   * Best-effort: navigation on an unknown platform can fail, and a visit that
+   * cannot be opened is simply reported as absent, which errs toward building
+   * rather than skipping. Recall matters more than precision.
+   */
+  private async runShallowReconcile(): Promise<void> {
+    const presentByVisit: Record<string, string[]> = {};
+
+    try {
+      for (const visit of this.ir.visits) {
+        const opened = await this.tryNavigateToVisitByName(visit.name);
+        if (!opened) continue;
+        const { observation } = await this.driver.perceiveAfterSettle(200);
+        presentByVisit[visit.name] = enumerateActionable(observation)
+          .map((e) => e.name)
+          .filter((n) => n.length > 0);
+      }
+    } catch {
+      // A failed survey is not a failed run: leave the tree summary partial
+      // and let the deep pass decide per form.
+    }
+
+    this.treeSummary = summariseTree(
+      this.ir.visits.map((v) => ({
+        visit_id: v.visit_id,
+        name: v.name,
+        forms: v.forms.map((f) => ({ form_id: f.form_id, name: f.name })),
+      })),
+      presentByVisit,
+    );
+
+    this.journal.note(
+      'preflight',
+      `${this.treeSummary.visitsPresent} of ${this.treeSummary.visitsWanted} visits and ` +
+      `${this.treeSummary.formAppearancesPresent} of ${this.treeSummary.formAppearancesWanted} ` +
+      `form appearances already exist` +
+      (this.deepReconcileAvailable
+        ? ''
+        : '; field-level reconciliation is UNAVAILABLE on this platform'),
+    );
+
+    this.callbacks.onReconcileSummary?.(this.treeSummary, this.deepReconcileAvailable);
+  }
+
+  /** Navigate to a visit by its input-file name. Returns false when no visit
+   *  with that name is reachable, which means it does not exist yet. The name
+   *  comes from the input file, so matching against it is data, not a
+   *  hardcoded vocabulary guess. */
+  private async tryNavigateToVisitByName(name: string): Promise<boolean> {
+    const { observation } = await this.driver.perceiveAfterSettle(150);
+    const target = normaliseLabel(name);
+    const match = enumerateActionable(observation).find(
+      (e) => normaliseLabel(e.name) === target,
+    );
+    if (!match) return false;
+    const res = await this.driver.click(match.handle);
+    if (!res.ok) return false;
+    await this.sleep(250);
+    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -392,6 +533,40 @@ export class Orchestrator {
   ): Promise<void> {
     const field = this.irFieldMap.get(item.field_id);
     if (!field) return;
+
+    // Reconcile decides whether this item needs building at all. Consulting it
+    // BEFORE any mutation is what makes a re-run a no-op and what stops the
+    // agent overwriting work someone may have done deliberately.
+    const reconciled = this.formReconcile.get(item.form_id);
+    const decision = reconciled?.decisions.find((d) => d.field_id === item.field_id);
+
+    if (decision?.action === 'adopt') {
+      const record = this.runState.items[itemKey];
+      if (record) {
+        record.state = 'verified';
+        record.last_verdict = 'VERIFIED';
+        await saveRunState(this.adapter, this.runState);
+      }
+      this.journal.adopted(this.sourceOf(item), decision.reason);
+      return;
+    }
+
+    if (decision?.action === 'escalate') {
+      await this.escalateItem(itemKey, 'verifying', {
+        key: itemKey,
+        fieldLabel: item.label,
+        formName: item.form_name,
+        visitName: item.visit_name,
+        canonicalType: item.canonical_type,
+        reason: decision.reason,
+        suspectedTrap:
+          `a field with this label already exists but its ${decision.mismatch} ` +
+          `differs; not modifying work that may have been done deliberately`,
+        evidence: [decision.reason],
+        phase: 'verifying',
+      }, /* blocking */ false);
+      return;
+    }
 
     const form = this.irFormMap.get(item.form_id);
     const visit = this.irVisitMap.get(item.visit_id);
@@ -473,8 +648,18 @@ export class Orchestrator {
     }
 
     if (!typeBinding) {
+      // Every field of this canonical type is stuck behind this one answer,
+      // so it blocks -- and it groups, so answering settles all of them.
+      const affected = this.linearItems.filter(
+        (i) => i.kind === 'add' && i.canonical_type === field.canonical_type,
+      );
       await this.escalateItem(itemKey, 'binding', {
         key: itemKey,
+        groupKey: `type:${field.canonical_type}`,
+        blastRadius: {
+          fields: affected.length,
+          forms: new Set(affected.map((i) => i.form_id)).size,
+        },
         fieldLabel: field.label,
         formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
         visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
@@ -482,7 +667,7 @@ export class Orchestrator {
         reason: `No binding found for type "${field.canonical_type}" in the element palette after Rung 0 & Rung 1 probes`,
         evidence: ['No palette button matched this canonical type structurally'],
         phase: 'binding',
-      });
+      }, /* blocking */ true);
       return;
     }
 
@@ -514,7 +699,7 @@ export class Orchestrator {
           evidence: typeBinding.evidence,
           binding: typeBinding,
           phase: 'verifying',
-        });
+        }, /* blocking */ false);
       }
     }
   }
@@ -686,7 +871,7 @@ export class Orchestrator {
         evidence: [verdict.reason],
         verdict,
         phase: 'verifying',
-      });
+      }, /* blocking */ false);
     } else {
       await applyTransition(this.adapter, this.runState, itemKey, 'verify_failed');
       const record = this.runState.items[itemKey];
@@ -701,7 +886,7 @@ export class Orchestrator {
           evidence: [verdict.reason],
           verdict,
           phase: 'verifying',
-        });
+        }, /* blocking */ false);
       }
     }
   }
@@ -867,6 +1052,55 @@ export class Orchestrator {
 
     this.currentFormId = formId;
     await this.discoverFormBuilder();
+
+    // Deep reconcile: what is ACTUALLY in this form right now.
+    //
+    // This is also where the reuse question answers itself. A form that arrives
+    // already populated means the platform shares definitions across visits, so
+    // its fields are adopted; an empty one means it rebuilds per visit, so they
+    // are built. Discovered by looking, never assumed in either direction.
+    if (this.deepReconcileAvailable) {
+      const irForm = this.irFormMap.get(formId);
+      const irVisit = this.irVisitMap.get(visitId);
+      if (irForm && irVisit) {
+        const { observation } = await this.driver.perceiveAfterSettle(250);
+        const present = readObservedFields(observation);
+        const result = reconcileForm(
+          {
+            form_id: irForm.form_id,
+            name: irForm.name,
+            fields: irForm.fields.map((f) => ({
+              visit_id: visitId,
+              form_id: irForm.form_id,
+              field_id: f.field_id,
+              label: f.label,
+              canonical_type: f.canonical_type,
+              required: f.required,
+              coded_pairs: f.options,
+              range_units: f.range,
+            })),
+          },
+          present,
+        );
+        this.formReconcile.set(formId, result);
+
+        if (result.sharedDefinition) {
+          this.journal.note(
+            `${irVisit.name} > ${irForm.name}`,
+            'form arrived already populated: this platform shares form definitions ' +
+            'across visits, so its fields are adopted rather than rebuilt',
+          );
+        }
+        if (result.unexpected.length > 0) {
+          this.journal.note(
+            `${irVisit.name} > ${irForm.name}`,
+            `${result.unexpected.length} control(s) present that the input file does ` +
+            `not mention: ${result.unexpected.map((u) => u.label).join(', ')}. ` +
+            `Reported, not removed -- they may be deliberate work.`,
+          );
+        }
+      }
+    }
   }
 
   private async discoverFormBuilder(): Promise<void> {
@@ -1082,36 +1316,73 @@ export class Orchestrator {
   // Escalation.
   // -------------------------------------------------------------------------
 
+  /**
+   * Escalate an item to the human gate.
+   *
+   * Blocking escalations pause the run because it genuinely cannot proceed
+   * without an answer -- no commit control, or an unresolved canonical type
+   * that every field of that type is stuck behind. Non-blocking ones are
+   * parked and the run continues, so a 195-field build is one review session
+   * at the end rather than an interrupt-driven slog.
+   *
+   * Items sharing a groupKey resolve together: answering "single_select maps
+   * to Beam Pick" once settles all 14 single_select fields.
+   */
   private async escalateItem(
     itemKey: string,
     phase: 'binding' | 'acting' | 'verifying',
-    escalation: EscalationItem,
-  ): Promise<void> {
-    // Mark the item as escalated in the state machine.
+    escalation: Omit<EscalationItem, 'blocking'>,
+    blocking: boolean,
+  ): Promise<HumanDecision | null> {
+    // A decision already given for this group settles this item too.
+    const existing = escalation.groupKey
+      ? this.groupDecisions.get(escalation.groupKey)
+      : undefined;
+    if (existing) return existing;
+
     const record = this.runState.items[itemKey];
     if (record && record.state !== 'escalated') {
       await applyTransition(this.adapter, this.runState, itemKey, 'escalate');
     }
 
-    // Notify the side panel.
-    this.callbacks.onEscalation(escalation);
+    const item: EscalationItem = { ...escalation, blocking };
+    this.callbacks.onEscalation(item);
 
-    // Wait for human decision.
+    const source = this.sourceOfKey(itemKey, escalation);
+
+    if (!blocking) {
+      // Park it. The run continues; the reviewer clears the pile at the end.
+      this.parked.push(item);
+      this.journal.escalated(source, escalation.reason, null);
+      return null;
+    }
+
     const decision = await new Promise<HumanDecision>((resolve) => {
       this.escalationQueue.set(itemKey, { resolve });
     });
 
-    // Apply the decision.
+    this.journal.escalated(source, escalation.reason, {
+      action: decision.action,
+      note: decision.note,
+    });
+
+    if (escalation.groupKey) {
+      this.groupDecisions.set(escalation.groupKey, decision);
+    }
+
+    await this.applyHumanDecision(itemKey, decision);
+    return decision;
+  }
+
+  /** Apply a human decision to one item. */
+  private async applyHumanDecision(itemKey: string, decision: HumanDecision): Promise<void> {
     if (decision.action === 'approve') {
-      // Accept the agent's best guess -- mark as verified.
       await this.markVerified(itemKey);
     } else if (decision.action === 'skip') {
       // Leave as escalated, move on.
     } else if (decision.action === 'override' && decision.overrideType) {
-      // Re-bind with the corrected type and retry.
       const field = this.irFieldMap.get(this.runState.items[itemKey]?.field_id ?? '');
       if (field) {
-        // Override: update the type binding.
         const newBinding = bindFieldAdd(
           (await this.driver.perceive()).observation,
           decision.overrideType,
@@ -1121,18 +1392,77 @@ export class Orchestrator {
         }
       }
     } else if (decision.action === 'retry') {
-      // Will be retried on the next pass.
       this.runState.items[itemKey].state = 'pending';
       this.runState.items[itemKey].rebind_count = 0;
     }
   }
 
-  private async markVerified(itemKey: string): Promise<void> {
+  /** Best-effort provenance for an escalation, which may not have a LinearItem. */
+  private sourceOfKey(itemKey: string, e: Omit<EscalationItem, 'blocking'>): IrSource {
+    const item = this.linearItems.find(
+      (i) => idempotencyKey(i.visit_id, i.form_id, i.field_id) === itemKey,
+    );
+    if (item) return this.sourceOf(item);
+    return {
+      path: itemKey,
+      visit_name: e.visitName,
+      form_name: e.formName,
+      field_label: e.fieldLabel,
+      declared_type: e.canonicalType,
+    };
+  }
+
+  /** Provenance for a step: which entry in the input file it came from. */
+  private sourceOf(item: LinearItem): IrSource {
+    const visitIndex = this.ir.visits.findIndex((v) => v.visit_id === item.visit_id);
+    const visit = this.ir.visits[visitIndex];
+    const formIndex = visit ? visit.forms.findIndex((f) => f.form_id === item.form_id) : -1;
+    const form = formIndex >= 0 ? visit.forms[formIndex] : undefined;
+    const fieldIndex = form ? form.fields.findIndex((f) => f.field_id === item.field_id) : -1;
+    return {
+      path: `visits[${visitIndex}].forms[${formIndex}].fields[${fieldIndex}]`,
+      visit_name: item.visit_name,
+      form_name: item.form_name,
+      field_label: item.label,
+      declared_type: item.canonical_type,
+    };
+  }
+
+  /** The provenance journal, for export from the side panel. */
+  getJournal(): Journal {
+    return this.journal;
+  }
+
+  /** Non-blocking escalations awaiting end-of-run review. */
+  getParked(): EscalationItem[] {
+    return this.parked.slice();
+  }
+
+  /** Shallow-pass survey, for the pre-flight screen. */
+  getTreeSummary(): TreeSummary | null {
+    return this.treeSummary;
+  }
+
+  private async markVerified(itemKey: string, evidence?: {
+    rung: BindingRung; evidence: string[]; reason: string;
+  }): Promise<void> {
     const record = this.runState.items[itemKey];
     if (record) {
       record.state = 'verified';
       record.last_verdict = 'VERIFIED';
       await saveRunState(this.adapter, this.runState);
+    }
+
+    const item = this.linearItems.find(
+      (i) => idempotencyKey(i.visit_id, i.form_id, i.field_id) === itemKey,
+    );
+    if (item) {
+      this.journal.created(
+        this.sourceOf(item),
+        item.op,
+        { rung: evidence?.rung ?? 0, evidence: evidence?.evidence ?? [item.description] },
+        { verdict: 'VERIFIED', reason: evidence?.reason ?? `${item.description} confirmed by read-back` },
+      );
     }
   }
 
@@ -1216,6 +1546,10 @@ export class Orchestrator {
             visitName: visit?.name ?? record.visit_id,
             canonicalType: (field?.canonical_type ?? 'text') as CanonicalType,
             reason: record.escalation_reason ?? 'unknown',
+            // Reconstructed from persisted state, which does not record the
+            // flag. Reported as non-blocking: the run reached its summary, so
+            // nothing was still holding it up.
+            blocking: false,
             evidence: [],
             phase: 'verifying',
           });
