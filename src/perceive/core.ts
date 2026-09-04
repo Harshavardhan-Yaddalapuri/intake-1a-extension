@@ -40,6 +40,9 @@ export interface ElementState {
    *  Scoring criterion 7 read-back. Absent when the platform expresses
    *  neither, which is not the same as false. */
   required?: boolean;
+  /** aria-valuemin/aria-valuemax, falling back to native min/max/step.
+   *  Scoring criterion 9 read-back. */
+  range?: { min?: number; max?: number; step?: number };
 }
 
 export interface ObservationElement {
@@ -302,6 +305,34 @@ function isRequired(el: Element): boolean | undefined {
   return undefined;
 }
 
+/** Parse an attribute as a finite number, or undefined. A platform that
+ *  writes a non-numeric bound has not declared a usable range. */
+function numAttr(el: Element, ...names: string[]): number | undefined {
+  for (const name of names) {
+    const raw = el.getAttribute(name);
+    if (raw === null || raw.trim() === '') continue;
+    const n = Number(raw);
+    if (Number.isFinite(n)) return n;
+    // A present-but-unparseable value on the preferred attribute should not
+    // fall through to a less-preferred one: the author declared it here.
+    return undefined;
+  }
+  return undefined;
+}
+
+/** Range bounds. ARIA value attributes take precedence over native ones. */
+function readRange(el: Element): ElementState['range'] {
+  const min = numAttr(el, 'aria-valuemin', 'min');
+  const max = numAttr(el, 'aria-valuemax', 'max');
+  const step = numAttr(el, 'step');
+  if (min === undefined && max === undefined && step === undefined) return undefined;
+  const range: NonNullable<ElementState['range']> = {};
+  if (min !== undefined) range.min = min;
+  if (max !== undefined) range.max = max;
+  if (step !== undefined) range.step = step;
+  return range;
+}
+
 export function computeState(el: Element): ElementState {
   const state: ElementState = {};
   const checked = isChecked(el);
@@ -311,6 +342,8 @@ export function computeState(el: Element): ElementState {
   if (expanded !== undefined) state.expanded = expanded;
   const required = isRequired(el);
   if (required !== undefined) state.required = required;
+  const range = readRange(el);
+  if (range !== undefined) state.range = range;
   const value = currentValue(el);
   if (value !== undefined) state.value = value;
   return state;

@@ -229,3 +229,46 @@ test('state: required works on non-input roles', () => {
   const d = doc(`<div id="x" role="combobox" aria-required="true"></div>`);
   assert.equal(computeState(el(d, '#x')).required, true);
 });
+
+// ---------------------------------------------------------------------------
+// Range state (scoring criterion 9).
+// ---------------------------------------------------------------------------
+
+test('state: native min/max on a number input', () => {
+  const d = doc(`<input id="x" type="number" min="30" max="200" />`);
+  const r = computeState(el(d, '#x')).range;
+  assert.deepEqual(r, { min: 30, max: 200 });
+});
+
+test('state: native step is captured', () => {
+  const d = doc(`<input id="x" type="number" min="0" max="10" step="0.1" />`);
+  const r = computeState(el(d, '#x')).range;
+  assert.deepEqual(r, { min: 0, max: 10, step: 0.1 });
+});
+
+test('state: aria-valuemin/aria-valuemax on a custom control', () => {
+  const d = doc(`<div id="x" role="spinbutton" aria-valuemin="1" aria-valuemax="5"></div>`);
+  const r = computeState(el(d, '#x')).range;
+  assert.deepEqual(r, { min: 1, max: 5 });
+});
+
+test('state: aria wins over native for range', () => {
+  const d = doc(`<input id="x" type="number" min="1" max="2" aria-valuemin="10" aria-valuemax="20" />`);
+  const r = computeState(el(d, '#x')).range;
+  assert.deepEqual(r, { min: 10, max: 20 });
+});
+
+test('state: a partial range records only what is present', () => {
+  const d = doc(`<input id="x" type="number" min="5" />`);
+  assert.deepEqual(computeState(el(d, '#x')).range, { min: 5 });
+});
+
+test('state: range is absent when no bound is declared', () => {
+  const d = doc(`<input id="x" type="number" />`);
+  assert.equal(computeState(el(d, '#x')).range, undefined);
+});
+
+test('state: non-numeric min/max values are ignored', () => {
+  const d = doc(`<input id="x" type="number" min="abc" max="200" />`);
+  assert.deepEqual(computeState(el(d, '#x')).range, { max: 200 });
+});
