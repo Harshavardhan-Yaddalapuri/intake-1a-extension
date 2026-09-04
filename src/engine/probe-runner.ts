@@ -16,12 +16,12 @@
  *   - NEVER uses mock debug hooks (__readState, __groundTruth).
  */
 
+import { CANONICAL_TYPES } from '../shared/contract';
 import type {
   BindingRecord,
   CanonicalType,
   ContractOpId,
 } from '../shared/contract';
-import { CANONICAL_TYPES } from '../shared/contract';
 import type { Observation } from '../perceive/core';
 import { diffObservations } from '../perceive/core';
 import {
@@ -129,6 +129,37 @@ export class ProbeRunner {
     }
 
     return { bindings, discovered };
+  }
+
+  /**
+   * Place ONE specific candidate and read back what appeared.
+   *
+   * This is the adjudication step for rung 2: the model names a candidate,
+   * this places it, and the observed role decides whether the model was right.
+   * Shares its logic with probePalette's sweep so the two cannot drift.
+   */
+  async placeAndInspect(handle: string): Promise<{
+    probe: ProbeResult;
+    matchedTypes: CanonicalType[];
+  }> {
+    const before = await this.driver.perceive();
+    const clickRes = await this.driver.click(handle);
+    if (!clickRes.ok) {
+      return {
+        probe: inspectPlacedControl(before.observation, before.observation),
+        matchedTypes: [],
+      };
+    }
+    await this.sleep(250);
+    const after = await this.driver.perceiveAfterSettle(200);
+
+    const probe = inspectPlacedControl(before.observation, after.observation);
+    if (probe.observedRole === 'none') return { probe, matchedTypes: [] };
+
+    const matchedTypes = CANONICAL_TYPES.filter(
+      (t) => classifyTypeFromProbe(t, probe).matches,
+    );
+    return { probe, matchedTypes };
   }
 
   /**

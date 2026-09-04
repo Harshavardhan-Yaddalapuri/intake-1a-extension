@@ -75,6 +75,8 @@ import {
 } from '../bind/ranking';
 import { rankCommitCandidates, readObservedFields, bindFormListFields } from '../bind/rung0';
 import { Journal, type IrSource } from './journal';
+import { rankWithLlm } from '../bind/rung2';
+import { makeTypeBinding } from '../bind/rung1';
 import {
   reconcileForm,
   summariseTree,
@@ -647,6 +649,69 @@ export class Orchestrator {
       typeBinding = this.typeBindings[field.canonical_type];
     }
 
+    // Rung 2: the model narrows the field. It NEVER decides -- its top pick is
+    // placed and read back, and a disagreement escalates showing both views.
+    // With no key configured this rung is skipped entirely and the item goes
+    // straight to the human, so the build completes either way.
+    const rung2Evidence: string[] = [];
+    if (!typeBinding) {
+      const stored = await chrome.storage.local.get('anthropicApiKey');
+      const apiKey: string | null =
+        typeof stored?.anthropicApiKey === 'string' ? stored.anthropicApiKey : null;
+
+      if (apiKey) {
+        const { observation: paletteObs } = await this.driver.perceive();
+        const pool = rankCandidates(enumerateActionable(paletteObs), { hint: 'palette' });
+        const llmRanked = await rankWithLlm(field.canonical_type, pool, {
+          apiKey,
+          fetch: (url, init) => globalThis.fetch(url as string, init as RequestInit),
+        });
+
+        if (llmRanked && llmRanked.length > 0) {
+          const pick = llmRanked[0];
+          const adjudication = await this.probeRunner.placeAndInspect(pick.el.handle);
+
+          if (adjudication.matchedTypes.includes(field.canonical_type)) {
+            const binding = makeTypeBinding(
+              field.canonical_type,
+              adjudication.probe,
+              pick.el.name,
+              pick.el.handle,
+            );
+            this.typeBindings[field.canonical_type] = binding;
+            typeBinding = binding;
+            this.journal.created(
+              this.sourceOf(item),
+              'field.add',
+              {
+                rung: 2,
+                evidence: [
+                  `rung 2 ranked "${pick.el.name}" first: ${pick.llmRationale}`,
+                  `probe confirmed: placing it produced role "${adjudication.probe.observedRole}"`,
+                ],
+                llm_rationale: pick.llmRationale,
+                llm_rank: pick.llmRank,
+              },
+              { verdict: 'VERIFIED', reason: 'probe confirmed the rung 2 ranking' },
+            );
+          } else {
+            // The model was confident and the platform disagreed. Carry BOTH
+            // opinions into the escalation so the human sees the conflict
+            // rather than a bare failure.
+            rung2Evidence.push(
+              `rung 2 suggested "${pick.el.name}" (${pick.llmRationale}), but placing it ` +
+              `produced role "${adjudication.probe.observedRole}", which does not realise ` +
+              `"${field.canonical_type}"`,
+            );
+          }
+        } else {
+          rung2Evidence.push('rung 2 could not rank the candidates; escalating');
+        }
+      } else {
+        rung2Evidence.push('rung 2 unavailable (no API key configured); escalating');
+      }
+    }
+
     if (!typeBinding) {
       // Every field of this canonical type is stuck behind this one answer,
       // so it blocks -- and it groups, so answering settles all of them.
@@ -665,7 +730,10 @@ export class Orchestrator {
         visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
         canonicalType: field.canonical_type,
         reason: `No binding found for type "${field.canonical_type}" in the element palette after Rung 0 & Rung 1 probes`,
-        evidence: ['No palette button matched this canonical type structurally'],
+        evidence: [
+          'no palette control matched this canonical type structurally after rungs 0 and 1',
+          ...rung2Evidence,
+        ],
         phase: 'binding',
       }, /* blocking */ true);
       return;
