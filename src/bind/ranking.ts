@@ -33,7 +33,12 @@ export type HintKey =
   | 'status'
   | 'study_root'
   | 'visit_list'
-  | 'name_input';
+  | 'name_input'
+  | 'property_editor'
+  | 'decimals'
+  | 'formula'
+  | 'date_options'
+  | 'template';
 
 /** Weak lexical priors. A word here may raise a candidate's rank. A word here
  *  may NEVER remove a candidate from the pool. Words are deliberately generic
@@ -52,6 +57,15 @@ export const LEXICAL_HINTS: Record<HintKey, readonly string[]> = {
   study_root: ['study', 'plan', 'protocol', 'home', 'overview', 'dashboard'],
   visit_list: ['visit', 'schedule', 'phase', 'timeline', 'list'],
   name_input: ['name', 'label', 'title', 'identifier', 'id', 'caption'],
+  property_editor: [
+    'label', 'element type', 'visibility', 'delete', 'required', 'hidden',
+    'add value', 'paste values', 'apply pasted', 'minimum', 'maximum', 'units',
+    'decimal places', 'formula', 'allow past', 'allow future',
+  ],
+  decimals: ['decimal', 'precision', 'places'],
+  formula: ['formula', 'expression', 'calculation', 'derived'],
+  date_options: ['allow past', 'allow future', 'picker options', 'date range'],
+  template: ['template', 'banked', 'bank it', 'library', 'reusable'],
 };
 
 /** Signal weights. Structural evidence outranks vocabulary, deliberately:
