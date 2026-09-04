@@ -81,6 +81,7 @@ async function main() {
     ['src/bind/ranking.ts', 'bind-ranking.mjs'],
     ['src/engine/reconcile.ts', 'reconcile.mjs'],
     ['src/engine/journal.ts', 'journal.mjs'],
+    ['src/bind/rung2.ts', 'bind-rung2.mjs'],
     // S4 modules.
     ['src/shared/messages.ts', 'messages.mjs'],
     ['src/engine/tab-driver.ts', 'tab-driver.mjs'],

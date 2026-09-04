@@ -3,15 +3,27 @@
   "name": "Intake 1a - eSource Build Agent",
   "version": "0.2.0",
   "description": "Builds a clinical study in an unknown eSource form designer via accessibility-tree perception and a human gate.",
-  "permissions": ["activeTab", "storage", "scripting", "sidePanel"],
-  "host_permissions": ["<all_urls>"],
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "https://api.anthropic.com/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
