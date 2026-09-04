@@ -264,15 +264,17 @@
     </div>
 
     <details class="card" id="llm-config">
-      <summary style="cursor:pointer;font-weight:600;">Optional: AI-assisted type mapping</summary>
+      <summary style="cursor:pointer;font-weight:600;">Optional: AI-assisted type mapping (OpenRouter)</summary>
       <p style="font-size:11px;color:var(--text-muted);margin:8px 0;">
         Used only when structural matching and probing both fail to identify a
         control. Its suggestion is always confirmed by placing the control and
         reading back what appeared, so a wrong answer cannot reach the study.
         With no key the build still completes — ambiguous types go to the review
-        queue instead.
+        queue instead. Get a free key at
+        <a href="https://openrouter.ai/keys" target="_blank" rel="noopener" style="color:inherit;">openrouter.ai/keys</a>
+        — no payment method required.
       </p>
-      <input type="password" id="api-key" placeholder="Anthropic API key (stored locally, never bundled)"
+      <input type="password" id="api-key" placeholder="OpenRouter API key (stored locally, never bundled)"
              style="width:100%;padding:6px;font-size:11px;box-sizing:border-box;">
       <div style="margin-top:6px;display:flex;gap:6px;align-items:center;">
         <button class="btn btn-sm" id="save-key">Save</button>

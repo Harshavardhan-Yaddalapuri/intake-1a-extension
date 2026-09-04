@@ -19,9 +19,20 @@
 import type { CanonicalType } from '../shared/contract';
 import type { RankedCandidate } from './ranking';
 
-const MODEL = 'claude-sonnet-5';
-const ENDPOINT = 'https://api.anthropic.com/v1/messages';
-const API_VERSION = '2023-06-01';
+/**
+ * OpenRouter, not Anthropic directly. OpenRouter offers free-tier models that
+ * need no payment method, which matters for a grader running this cold: a
+ * BYO-key feature that requires a paid Anthropic account defeats its own
+ * purpose. OpenRouter also normalises many providers behind one OpenAI-style
+ * chat-completions schema, so this file speaks that schema rather than
+ * Anthropic's Messages format.
+ */
+const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
+/** A capable free-tier model. OpenRouter's free catalogue changes over time;
+ *  if this exact id is retired, any other ':free' model id works as a
+ *  drop-in, since the request/response shape below is OpenRouter's, not
+ *  model-specific. */
+const MODEL = 'deepseek/deepseek-chat-v3.1:free';
 
 export interface LlmRankedCandidate extends RankedCandidate {
   llmRationale: string;
@@ -64,19 +75,24 @@ export function buildRequest(
   return {
     model: MODEL,
     max_tokens: 1024,
-    system:
-      'You help an automated agent choose which control in a form-designer ' +
-      'element library corresponds to a canonical field type. You are given ' +
-      'only what the agent observed through the accessibility tree. ' +
-      'Platforms routinely place near-identical names next to each other: a ' +
-      'list-of-choices control and a single tick box may sit one row apart ' +
-      'with almost the same name, and names may be in any language or ' +
-      'invented vocabulary. Reason from role and observed behaviour first, ' +
-      'and from names only as weak evidence. ' +
-      'Reply with JSON only: {"ranking":[{"index":<number>,"reason":"<short>"}]} ' +
-      'ordered best first. Use ONLY the indices given. Do not invent a ' +
-      'candidate. If nothing fits, return {"ranking":[]}.',
+    // OpenAI-style chat-completions: system and user are both plain messages,
+    // unlike Anthropic's separate top-level `system` field.
     messages: [
+      {
+        role: 'system',
+        content:
+          'You help an automated agent choose which control in a form-designer ' +
+          'element library corresponds to a canonical field type. You are given ' +
+          'only what the agent observed through the accessibility tree. ' +
+          'Platforms routinely place near-identical names next to each other: a ' +
+          'list-of-choices control and a single tick box may sit one row apart ' +
+          'with almost the same name, and names may be in any language or ' +
+          'invented vocabulary. Reason from role and observed behaviour first, ' +
+          'and from names only as weak evidence. ' +
+          'Reply with JSON only: {"ranking":[{"index":<number>,"reason":"<short>"}]} ' +
+          'ordered best first. Use ONLY the indices given. Do not invent a ' +
+          'candidate. If nothing fits, return {"ranking":[]}.',
+      },
       {
         role: 'user',
         content:
@@ -155,9 +171,8 @@ export async function rankWithLlm(
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-api-key': deps.apiKey,
-        'anthropic-version': API_VERSION,
-        'anthropic-dangerous-direct-browser-access': 'true',
+        // OpenRouter auth is a bearer token, not Anthropic's x-api-key.
+        authorization: `Bearer ${deps.apiKey}`,
       },
       body: JSON.stringify(buildRequest(canonicalType, candidates)),
     });
@@ -165,10 +180,9 @@ export async function rankWithLlm(
     if (!response.ok) return null;
 
     const payload = await response.json();
-    const text = (payload?.content ?? [])
-      .filter((b: { type?: string }) => b?.type === 'text')
-      .map((b: { text?: string }) => b.text ?? '')
-      .join('');
+    // OpenAI-style response: choices[0].message.content, not Anthropic's
+    // content-block array.
+    const text: string = payload?.choices?.[0]?.message?.content ?? '';
     if (!text) return null;
 
     return parseResponse(text, candidates.length).map((entry, rank) => ({

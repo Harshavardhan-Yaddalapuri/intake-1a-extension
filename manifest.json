@@ -11,7 +11,7 @@
   ],
   "host_permissions": [
     "<all_urls>",
-    "https://api.anthropic.com/*"
+    "https://openrouter.ai/*"
   ],
   "background": {
     "service_worker": "background.js"

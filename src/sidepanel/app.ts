@@ -568,8 +568,8 @@ function renderParkedReview(items: EscalationItem[]): void {
 async function refreshKeyStatus(justChanged = false): Promise<void> {
   const el = $('key-status');
   if (!el) return;
-  const stored = await chrome.storage.local.get('anthropicApiKey');
-  const has = typeof stored?.anthropicApiKey === 'string' && stored.anthropicApiKey.length > 0;
+  const stored = await chrome.storage.local.get('openRouterApiKey');
+  const has = typeof stored?.openRouterApiKey === 'string' && stored.openRouterApiKey.length > 0;
   el.textContent = has
     ? (justChanged ? 'Key saved. AI assist enabled.' : 'Key configured. AI assist enabled.')
     : 'No key. Ambiguous types will be escalated instead.';
@@ -580,13 +580,13 @@ $('save-key')?.addEventListener('click', async () => {
   if (!input) return;
   const value = input.value.trim();
   if (!value) return;
-  await chrome.storage.local.set({ anthropicApiKey: value });
+  await chrome.storage.local.set({ openRouterApiKey: value });
   input.value = '';
   await refreshKeyStatus(true);
 });
 
 $('clear-key')?.addEventListener('click', async () => {
-  await chrome.storage.local.remove('anthropicApiKey');
+  await chrome.storage.local.remove('openRouterApiKey');
   await refreshKeyStatus(true);
 });
 

@@ -25,8 +25,9 @@ test('the request contains only observed candidates, never DOM', () => {
   assert.ok(!body.includes('querySelector') && !body.includes('class='), 'no DOM or CSS may be sent');
 });
 
-test('the request names a current model', () => {
-  assert.match(buildRequest('single_select', candidates()).model, /claude/);
+test('the request names a real OpenRouter model id', () => {
+  assert.match(buildRequest('single_select', candidates()).model, /\//,
+    'OpenRouter model ids are namespaced as "<provider>/<model>", e.g. "deepseek/deepseek-chat-v3.1:free"');
 });
 
 test('the request explains the type semantically, not by spelling', () => {
@@ -81,7 +82,7 @@ test('rankWithLlm returns null on a non-200 response', async () => {
 test('rankWithLlm returns null on malformed content', async () => {
   const r = await rankWithLlm('single_select', candidates(), {
     apiKey: 'sk-test',
-    fetch: async () => ({ ok: true, status: 200, json: async () => ({ content: [{ type: 'text', text: 'no idea' }] }) }),
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'no idea' } }] }) }),
   });
   assert.equal(r, null);
 });
@@ -90,7 +91,7 @@ test('rankWithLlm reorders the given candidates and nothing else', async () => {
   const r = await rankWithLlm('single_select', candidates(), {
     apiKey: 'sk-test',
     fetch: async () => ({ ok: true, status: 200,
-      json: async () => ({ content: [{ type: 'text', text: JSON.stringify({ ranking: [{ index: 1, reason: 'a list' }] }) }] }) }),
+      json: async () => ({ choices: [{ message: { content: JSON.stringify({ ranking: [{ index: 1, reason: 'a list' }] }) } }] }) }),
   });
   assert.ok(r);
   assert.equal(r.length, 1);
@@ -101,9 +102,9 @@ test('rankWithLlm reorders the given candidates and nothing else', async () => {
 
 test('the API key never appears in the returned evidence', async () => {
   const r = await rankWithLlm('single_select', candidates(), {
-    apiKey: 'sk-ant-secret',
+    apiKey: 'sk-or-v1-secret',
     fetch: async () => ({ ok: true, status: 200,
-      json: async () => ({ content: [{ type: 'text', text: JSON.stringify({ ranking: [{ index: 0, reason: 'r' }] }) }] }) }),
+      json: async () => ({ choices: [{ message: { content: JSON.stringify({ ranking: [{ index: 0, reason: 'r' }] }) } }] }) }),
   });
-  assert.ok(!JSON.stringify(r).includes('sk-ant-secret'));
+  assert.ok(!JSON.stringify(r).includes('sk-or-v1-secret'));
 });
