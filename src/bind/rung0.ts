@@ -232,81 +232,80 @@ export function bindVisitOpen(obs: Observation): BindingRecord | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Bind form.create: find a button to create a new form/source document.
+ * Bind form.create.
+ *
+ * Same shape as visit.create: click-add, name it, confirm. The name field and
+ * confirm control usually materialise only after the add control is clicked,
+ * so at rung 0 they are opportunistic and the orchestrator rediscovers them
+ * from a fresh observation when they are absent here.
  */
 export function bindFormCreate(obs: Observation): BindingRecord | null {
-  const addCandidates: Candidate[] = [];
-  for (const el of obs.elements) {
-    if (el.role !== 'button') continue;
-    const name = el.name.toLowerCase();
-    if (name.includes('new') && (name.includes('form') || name.includes('document') || name.includes('source'))) {
-      addCandidates.push({
-        el,
-        confidence: 'structural',
-        evidence: `role=button, name~="${el.name}"`,
-      });
-    }
-    if (name.includes('add') || name.includes('new') || name === '+') {
-      addCandidates.push({
-        el,
-        confidence: 'hypothesis',
-        evidence: `role=button, name~="${el.name}" (name match, hypothesis)`,
-      });
-    }
-  }
+  const pool = enumerateActionable(obs);
+  if (pool.length === 0) return null;
 
-  if (addCandidates.length === 0) return null;
-  const best = addCandidates[0];
+  const ranked = rankCandidates(pool, { hint: 'form_create' });
+  const best = ranked[0];
+
   const recipe: RecipeStep[] = [
-    { step: 'click', evidence_role: 'button', evidence_name: best.el.name, handle_kind: 'snapshot-id' },
+    { step: 'click', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id' },
   ];
+  const evidence: string[] = [explainRanking(best, pool.length)];
 
-  // Name input for the form.
-  const nameInputs = findByRole(obs, 'textbox', { contains: 'name' })
-    .concat(findByRole(obs, 'textbox', { contains: 'document' }));
-  if (nameInputs.length > 0) {
-    recipe.push({ step: 'set_value', evidence_role: 'textbox', evidence_name: nameInputs[0].el.name, handle_kind: 'snapshot-id', value_from: 'ir' });
+  const textPool = enumerateByRoles(obs, ['textbox', 'searchbox']);
+  if (textPool.length > 0) {
+    const nameBox = rankCandidates(textPool, { hint: 'name_input' })[0];
+    recipe.push({
+      step: 'set_value',
+      evidence_role: nameBox.el.role,
+      evidence_name: nameBox.el.name,
+      handle_kind: 'snapshot-id',
+      value_from: 'ir',
+    });
+    evidence.push(`name field: ${explainRanking(nameBox, textPool.length)}`);
   }
 
-  // Create/save button.
-  const createButtons = findByRole(obs, 'button', { contains: 'create' })
-    .concat(findByRole(obs, 'button', { contains: 'save' }));
-  if (createButtons.length > 0) {
-    recipe.push({ step: 'click', evidence_role: 'button', evidence_name: createButtons[0].el.name, handle_kind: 'snapshot-id' });
+  const confirm = rankCandidates(pool, { hint: 'commit' })[0];
+  if (confirm && confirm.el.handle !== best.el.handle) {
+    recipe.push({
+      step: 'click',
+      evidence_role: confirm.el.role,
+      evidence_name: confirm.el.name,
+      handle_kind: 'snapshot-id',
+    });
+    evidence.push(`confirm control: ${explainRanking(confirm, pool.length)}`);
   }
 
   return makeBinding(
     'form.create',
     0,
     recipe,
-    'a new form appears in the visit document list',
-    [best.evidence],
-    best.confidence,
+    'a new source document appears under the open visit',
+    evidence,
+    'hypothesis',
   );
 }
 
 /**
- * Bind form.open: find a button/link to open a form's builder/editor.
+ * Bind form.open: reach the designer surface for a named form.
+ *
+ * Which form is resolved by the orchestrator against the IR-supplied name at
+ * act time; this binding only establishes that forms are openable.
  */
 export function bindFormOpen(obs: Observation): BindingRecord | null {
-  const candidates: Candidate[] = [];
-  for (const el of obs.elements) {
-    if (el.role !== 'button' && el.role !== 'link') continue;
-    const name = el.name.toLowerCase();
-    if (name.includes('edit') || name.includes('open') || name.includes('builder')) {
-      candidates.push({
-        el,
-        confidence: 'hypothesis',
-        evidence: `role=${el.role}, name~="${el.name}" (name match, hypothesis)`,
-      });
-    }
-  }
+  const pool = enumerateActionable(obs);
+  if (pool.length === 0) return null;
 
-  if (candidates.length === 0) return null;
-  const best = candidates[0];
-  return makeBinding('form.open', 0, [
-    { step: 'click', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id' },
-  ], `form builder/designer surface appears`, [best.evidence], best.confidence);
+  const ranked = rankCandidates(pool, { hint: 'form_open' });
+  const best = ranked[0];
+
+  return makeBinding(
+    'form.open',
+    0,
+    [{ step: 'click', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id' }],
+    'the form designer for the named document is reached',
+    [explainRanking(best, pool.length)],
+    'hypothesis',
+  );
 }
 
 /**
@@ -336,48 +335,44 @@ export function bindFormExists(obs: Observation): BindingRecord | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Bind field_palette.open: find a button/region that exposes the control
- * library / element palette.
+ * Bind field_palette.open.
+ *
+ * Two shapes exist in the wild: a library behind a control, and a library
+ * permanently visible as a strip or sidebar. Distinguish them structurally
+ * rather than by name -- when nothing ranks above the baseline but the surface
+ * is dense with actionable elements, the library is most likely already
+ * showing, and clicking an arbitrary control could navigate away instead.
  */
 export function bindFieldPaletteOpen(obs: Observation): BindingRecord | null {
-  const candidates: Candidate[] = [];
+  const pool = enumerateActionable(obs);
+  if (pool.length === 0) return null;
 
-  // Look for a region/aside/section that might be a palette.
-  for (const el of obs.elements) {
-    if (el.role !== 'button' && el.role !== 'link') continue;
-    const name = el.name.toLowerCase();
-    if (name.includes('element') || name.includes('library') || name.includes('palette') || name.includes('control')) {
-      candidates.push({
-        el,
-        confidence: 'hypothesis',
-        evidence: `role=${el.role}, name~="${el.name}" (name match, hypothesis)`,
-      });
-    }
+  const ranked = rankCandidates(pool, { hint: 'palette' });
+  const best = ranked[0];
+  const hasLexicalSignal = best.signals.some((sig) => sig.name === 'lexical');
+
+  if (!hasLexicalSignal && pool.length >= 5) {
+    return makeBinding(
+      'field_palette.open',
+      0,
+      [{ step: 'wait', handle_kind: 'role-only' }],
+      'the element library is visible',
+      [
+        `${pool.length} actionable elements present and none ranks as a library ` +
+        `opener; treating the library as already visible rather than clicking blind`,
+      ],
+      'tentative',
+    );
   }
 
-  // If no explicit palette button, look for a list of buttons that could be
-  // library items (buttons with control-type names in a compact list).
-  if (candidates.length === 0) {
-    const buttons = obs.elements.filter((e) => e.role === 'button');
-    // Heuristic: if there are 5+ buttons in a cluster, one group might be
-    // a palette. Mark as tentative.
-    if (buttons.length >= 5) {
-      return makeBinding(
-        'field_palette.open',
-        0,
-        [{ step: 'wait', handle_kind: 'role-only' }],
-        'element library is visible as a group of buttons',
-        [`${buttons.length} buttons visible (palette may be already open)`],
-        'tentative',
-      );
-    }
-  }
-
-  if (candidates.length === 0) return null;
-  const best = candidates[0];
-  return makeBinding('field_palette.open', 0, [
-    { step: 'click', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id' },
-  ], `element library/palette becomes visible`, [best.evidence], best.confidence);
+  return makeBinding(
+    'field_palette.open',
+    0,
+    [{ step: 'click', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id' }],
+    'the element library becomes visible',
+    [explainRanking(best, pool.length)],
+    'hypothesis',
+  );
 }
 
 // ---------------------------------------------------------------------------
