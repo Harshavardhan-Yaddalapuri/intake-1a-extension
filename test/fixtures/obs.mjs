@@ -10,7 +10,7 @@ export function elem(role, name, extra = {}) {
   seq += 1;
   return {
     index: extra.index ?? seq,
-    handle: extra.handle ?? `0/1/${seq}`,
+    handle: extra.handle ?? `0.1.${seq}`,
     role,
     name,
     nameSource: extra.nameSource ?? 'content',

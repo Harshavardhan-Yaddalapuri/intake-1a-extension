@@ -78,6 +78,7 @@ async function main() {
     ['src/bind/cache.ts', 'bind-cache.mjs'],
     ['src/bind/rung0.ts', 'bind-rung0.mjs'],
     ['src/bind/rung1.ts', 'bind-rung1.mjs'],
+    ['src/bind/ranking.ts', 'bind-ranking.mjs'],
     // S4 modules.
     ['src/shared/messages.ts', 'messages.mjs'],
     ['src/engine/tab-driver.ts', 'tab-driver.mjs'],
