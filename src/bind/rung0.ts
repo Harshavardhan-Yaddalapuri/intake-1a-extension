@@ -17,6 +17,7 @@ import type {
   BindingRung,
   CanonicalType,
   ContractOpId,
+  ObservedField,
   PostCondition,
   RecipeStep,
 } from '../shared/contract';
@@ -861,4 +862,70 @@ function makeBinding(
     rung,
     status: confidence === 'hypothesis' ? 'bound' : 'bound', // hypotheses are still "bound" but flagged in evidence
   };
+}
+
+// ---------------------------------------------------------------------------
+// form.list_fields: what is actually in the open form right now.
+// ---------------------------------------------------------------------------
+
+/** Roles that realise a data-entry field. Structural, and deliberately drawn
+ *  from the same set VERIFY's expectedRoles() uses, so that "what is in this
+ *  form" and "does this field match its intent" agree about what a field is. */
+const FIELD_ROLES = [
+  'textbox', 'searchbox', 'spinbutton', 'combobox', 'listbox',
+  'radiogroup', 'checkbox', 'switch', 'slider',
+] as const;
+
+/**
+ * Project the current observation onto the fields present in the open form.
+ *
+ * Pure and read-only. It does not know which form is open -- the caller
+ * guarantees that by navigating there first. Everything with a field role
+ * counts, including controls with an EMPTY accessible name: an element that
+ * was added but never labelled is structurally present and semantically
+ * worthless, and reporting it is how that failure becomes visible instead of
+ * invisible.
+ */
+export function readObservedFields(obs: Observation): ObservedField[] {
+  return enumerateByRoles(obs, FIELD_ROLES).map((e) => ({
+    label: e.name,
+    role: e.role,
+    required: e.state.required,
+    range: e.state.range,
+    options: e.options,
+    handle: e.handle,
+  }));
+}
+
+/**
+ * Bind form.list_fields.
+ *
+ * Unlike the action bindings there is no recipe to click: enumeration is a
+ * read of the current observation. The binding exists so the capability report
+ * can state honestly whether this platform's fields are observable at all --
+ * on a canvas-rendered designer they are not, and reconciliation must then be
+ * reported as unavailable rather than silently returning an empty list that
+ * looks indistinguishable from an empty form.
+ */
+export function bindFormListFields(obs: Observation): BindingRecord | null {
+  const fields = readObservedFields(obs);
+  const named = fields.filter((f) => f.label.length > 0);
+  const unnamed = fields.length - named.length;
+
+  return makeBinding(
+    'form.list_fields',
+    0,
+    [{ step: 'wait', handle_kind: 'role-only' }],
+    'the controls in the open form are enumerable from the accessibility tree',
+    [
+      `${fields.length} field-role control(s) observed, ${named.length} with an accessible name`,
+      ...(unnamed > 0
+        ? [
+            `${unnamed} control(s) present but UNNAMED -- structurally there and ` +
+            `semantically worthless; these escalate rather than counting as built`,
+          ]
+        : []),
+    ],
+    fields.length > 0 ? 'structural' : 'tentative',
+  );
 }

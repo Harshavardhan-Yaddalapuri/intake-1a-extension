@@ -14,6 +14,8 @@ import {
   bindFormCreate,
   bindFieldPaletteOpen,
   bindCtxDiscard,
+  bindFormListFields,
+  readObservedFields,
 } from '../dist/bind-rung0.mjs';
 import { scrambleObservation } from './scramble.mjs';
 import { elem, obs, resetSeq } from './fixtures/obs.mjs';
@@ -73,4 +75,68 @@ test('scrambling changes which candidate ranks first, but never empties the pool
   // the probe adjudicates.
   assert.ok(plain.recipe[0].evidence_name);
   assert.ok(scrambled.recipe[0].evidence_name);
+});
+
+// ---------------------------------------------------------------------------
+// form.list_fields (Task 14): field enumeration must be role-based.
+// ---------------------------------------------------------------------------
+
+test('form.list_fields binds on a designer canvas', () => {
+  resetSeq();
+  const o = obs([
+    elem('button', 'Save'),
+    elem('textbox', 'Subject Initials', { state: { required: true } }),
+    elem('spinbutton', 'Age', { state: { range: { min: 18, max: 99 } } }),
+    elem('combobox', 'Sex', { options: ['Male', 'Female'] }),
+  ]);
+  assert.ok(bindFormListFields(o));
+});
+
+test('readObservedFields returns only value-bearing controls', () => {
+  resetSeq();
+  const o = obs([
+    elem('button', 'Save'),
+    elem('heading', 'Vital Signs'),
+    elem('textbox', 'Subject Initials'),
+    elem('combobox', 'Sex', { options: ['Male', 'Female'] }),
+  ]);
+  const labels = readObservedFields(o).map((f) => f.label).sort();
+  assert.deepEqual(labels, ['Sex', 'Subject Initials']);
+});
+
+test('readObservedFields carries required, range and options through', () => {
+  resetSeq();
+  const o = obs([
+    elem('spinbutton', 'Heart Rate', { state: { required: true, range: { min: 30, max: 200 } } }),
+    elem('combobox', 'Sex', { options: ['Male', 'Female'] }),
+  ]);
+  const byLabel = Object.fromEntries(readObservedFields(o).map((f) => [f.label, f]));
+  assert.equal(byLabel['Heart Rate'].required, true);
+  assert.deepEqual(byLabel['Heart Rate'].range, { min: 30, max: 200 });
+  assert.deepEqual(byLabel['Sex'].options, ['Male', 'Female']);
+});
+
+test('readObservedFields reports an UNNAMED control rather than hiding it', () => {
+  resetSeq();
+  const o = obs([elem('textbox', ''), elem('textbox', 'Named Field')]);
+  const fields = readObservedFields(o);
+  assert.equal(fields.length, 2, 'a control added but never labelled must still be reported');
+  const binding = bindFormListFields(o);
+  assert.ok(
+    binding.evidence.some((e) => /unnamed/i.test(e)),
+    'the binding must call out unnamed controls: present but semantically worthless',
+  );
+});
+
+test('readObservedFields works when every name is nonsense', () => {
+  resetSeq();
+  const plain = obs([
+    elem('textbox', 'Subject Initials'),
+    elem('combobox', 'Sex', { options: ['Male', 'Female'] }),
+  ]);
+  assert.equal(
+    readObservedFields(scrambleObservation(plain, 31)).length,
+    2,
+    'field enumeration must be role-based and unaffected by vocabulary',
+  );
 });
