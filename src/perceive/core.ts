@@ -36,6 +36,13 @@ export interface ElementState {
   disabled?: boolean;
   expanded?: boolean;
   value?: string;
+  /** aria-required, falling back to the native `required` attribute.
+   *  Scoring criterion 7 read-back. Absent when the platform expresses
+   *  neither, which is not the same as false. */
+  required?: boolean;
+  /** aria-valuemin/aria-valuemax, falling back to native min/max/step.
+   *  Scoring criterion 9 read-back. */
+  range?: { min?: number; max?: number; step?: number };
 }
 
 export interface ObservationElement {
@@ -54,6 +61,13 @@ export interface ObservationElement {
   options: string[];
   tagName: string;
   inputType?: string;
+  /** Text of the nearest containing group that is NOT part of any control:
+   *  the row, card, list item or panel this element sits in. Platforms
+   *  routinely render N identical controls (one "Edit" per row) whose only
+   *  distinguishing information is the text beside them; without this the
+   *  observation cannot tell them apart and BIND is choosing blind.
+   *  Plain observed text — no interpretation, no domain knowledge. */
+  groupText?: string;
 }
 
 export interface Observation {
@@ -288,6 +302,44 @@ function currentValue(el: Element): string | undefined {
   return undefined;
 }
 
+/** Required state. ARIA wins over the native attribute, per ARIA in HTML:
+ *  an explicit aria-required="false" is an author override of `required`. */
+function isRequired(el: Element): boolean | undefined {
+  const aria = el.getAttribute('aria-required');
+  if (aria === 'true') return true;
+  if (aria === 'false') return false;
+  if (el.hasAttribute('required')) return true;
+  return undefined;
+}
+
+/** Parse an attribute as a finite number, or undefined. A platform that
+ *  writes a non-numeric bound has not declared a usable range. */
+function numAttr(el: Element, ...names: string[]): number | undefined {
+  for (const name of names) {
+    const raw = el.getAttribute(name);
+    if (raw === null || raw.trim() === '') continue;
+    const n = Number(raw);
+    if (Number.isFinite(n)) return n;
+    // A present-but-unparseable value on the preferred attribute should not
+    // fall through to a less-preferred one: the author declared it here.
+    return undefined;
+  }
+  return undefined;
+}
+
+/** Range bounds. ARIA value attributes take precedence over native ones. */
+function readRange(el: Element): ElementState['range'] {
+  const min = numAttr(el, 'aria-valuemin', 'min');
+  const max = numAttr(el, 'aria-valuemax', 'max');
+  const step = numAttr(el, 'step');
+  if (min === undefined && max === undefined && step === undefined) return undefined;
+  const range: NonNullable<ElementState['range']> = {};
+  if (min !== undefined) range.min = min;
+  if (max !== undefined) range.max = max;
+  if (step !== undefined) range.step = step;
+  return range;
+}
+
 export function computeState(el: Element): ElementState {
   const state: ElementState = {};
   const checked = isChecked(el);
@@ -295,6 +347,10 @@ export function computeState(el: Element): ElementState {
   if (isDisabled(el)) state.disabled = true;
   const expanded = isExpanded(el);
   if (expanded !== undefined) state.expanded = expanded;
+  const required = isRequired(el);
+  if (required !== undefined) state.required = required;
+  const range = readRange(el);
+  if (range !== undefined) state.range = range;
   const value = currentValue(el);
   if (value !== undefined) state.value = value;
   return state;
@@ -444,6 +500,66 @@ export function isInteractive(el: Element): boolean {
   return false;
 }
 
+/** How far up the ancestor chain to look for group text before giving up. */
+const GROUP_TEXT_MAX_DEPTH = 6;
+/** Cap so a group-text read of a huge container cannot bloat the observation. */
+const GROUP_TEXT_MAX_LEN = 200;
+
+/** True when `node` sits inside an interactive element at or below `container`.
+ *  Such text belongs to a control's own label, not to the surrounding group. */
+function insideInteractive(from: Element | null, container: Element): boolean {
+  let cur = from;
+  while (cur && cur !== container) {
+    if (isInteractive(cur)) return true;
+    cur = cur.parentElement;
+  }
+  return false;
+}
+
+/** Enough fragments to identify a row or card; more is noise. */
+const GROUP_TEXT_MAX_PARTS = 8;
+/** Hard ceiling on nodes inspected per container, so an element whose nearest
+ *  text-bearing ancestor is the page root cannot walk the whole document. */
+const GROUP_TEXT_MAX_NODES = 120;
+
+/** Text contributed by `container` itself rather than by any control inside it. */
+function groupTextOf(container: Element): string {
+  const doc = container.ownerDocument;
+  if (!doc) return '';
+  const parts: string[] = [];
+  // 4 === NodeFilter.SHOW_TEXT. Spelled numerically so this runs under jsdom
+  // and in the service worker without the NodeFilter global.
+  const walker = doc.createTreeWalker(container, 4);
+  let visited = 0;
+  let node = walker.nextNode();
+  while (node && visited < GROUP_TEXT_MAX_NODES && parts.length < GROUP_TEXT_MAX_PARTS) {
+    visited += 1;
+    const text = (node.nodeValue ?? '').trim();
+    if (text) {
+      const parent = node.parentElement;
+      if (parent && isPerceivable(parent) && !insideInteractive(parent, container)) {
+        parts.push(text);
+      }
+    }
+    node = walker.nextNode();
+  }
+  return parts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+/** Nearest ancestor group text for an interactive element. Walks outward until
+ *  a container contributes text of its own. */
+export function computeGroupText(el: Element): string | undefined {
+  let cur = el.parentElement;
+  let depth = 0;
+  while (cur && depth < GROUP_TEXT_MAX_DEPTH) {
+    const text = groupTextOf(cur);
+    if (text) return text.slice(0, GROUP_TEXT_MAX_LEN);
+    cur = cur.parentElement;
+    depth += 1;
+  }
+  return undefined;
+}
+
 export function isPerceivable(el: Element): boolean {
   if (el.hasAttribute('hidden')) return false;
   if (el.getAttribute('aria-hidden') === 'true') return false;
@@ -518,6 +634,7 @@ export function observe(root?: Document | Element): Observation {
       options: computeOptions(el, role, doc),
       tagName: el.tagName.toLowerCase(),
       inputType: el.tagName.toLowerCase() === 'input' ? (el as HTMLInputElement).type : undefined,
+      groupText: computeGroupText(el),
     });
   }
 

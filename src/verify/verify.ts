@@ -58,10 +58,58 @@ export interface VerdictResult {
 // Semantic read-back helpers.
 // ---------------------------------------------------------------------------
 
-/** Find the element in a fresh Observation whose accessible name matches the
- *  intent label. Exact match only; near-matches are AMBIGUOUS, never trusted. */
-function findByName(obs: Observation, label: string): ObservationElement | undefined {
-  return obs.elements.find((e) => e.name === label);
+/** Normalise an accessible name for comparison: strip a trailing required
+ *  marker, collapse whitespace, case-fold. Applied to both sides. */
+export function normaliseLabel(name: string): string {
+  return name
+    .replace(/\s*\((?:required|mandatory)\)\s*$/i, '')
+    .replace(/\s*[*†‡]\s*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+export interface NameMatch {
+  el: ObservationElement;
+  /** True when the accessible name matched byte-for-byte. */
+  exact: boolean;
+}
+
+/** Resolve an intent label to at most one element.
+ *
+ *  Exact matches win outright. Failing that, normalised matches are used, but
+ *  only when exactly one candidate normalises to the target — two candidates
+ *  that both normalise to the same label is a genuine ambiguity and is
+ *  reported rather than resolved by picking the first. */
+export function resolveByName(
+  obs: Observation,
+  label: string,
+  unit?: string,
+): NameMatch | 'ambiguous' | null {
+  const exact = obs.elements.filter((e) => e.name === label);
+  if (exact.length === 1) return { el: exact[0], exact: true };
+  if (exact.length > 1) return 'ambiguous';
+
+  const target = normaliseLabel(label);
+
+  // Units are not an ARIA concept, so a platform that applies a unit usually
+  // renders it into the label: "Heart Rate (bpm)" or "Heart Rate bpm". Accept
+  // the label carrying EXACTLY the unit the input file declared, in either
+  // form, and nothing else. A generic "starts with the label" rule would let
+  // "Heart Rate" resolve against "Heart Rate Variability" — two fields that
+  // really do coexist in studies — and a field that resolves to its neighbour
+  // never gets built.
+  const accepted = new Set([target]);
+  if (unit) {
+    const u = unit.toLowerCase();
+    accepted.add(`${target} ${u}`);
+    accepted.add(`${target} (${u})`);
+  }
+
+  const loose = obs.elements.filter((e) => accepted.has(normaliseLabel(e.name)));
+  if (loose.length === 1) return { el: loose[0], exact: false };
+  if (loose.length > 1) return 'ambiguous';
+  return null;
 }
 
 /** Map a canonical type to the ARIA role(s) that realize it. This is the
@@ -108,15 +156,28 @@ function expectedRoles(canonical: CanonicalType): string[] {
  * we meant, and we cannot tell whether the platform silently changed it."
  */
 export function compareIntent(obs: Observation, intent: IntentRecord): VerdictResult {
-  const el = findByName(obs, intent.label);
+  const match = resolveByName(obs, intent.label, intent.range_units?.units);
 
-  // The field is simply absent: a clear failure.
-  if (!el) {
+  if (match === 'ambiguous') {
+    return {
+      verdict: 'AMBIGUOUS',
+      reason:
+        `more than one element resolves to the label "${intent.label}" in the ` +
+        `fresh observation; refusing to guess which one was meant`,
+      suspected_trap:
+        'duplicate or near-duplicate labels: a previous run may have built ' +
+        'this field twice, or the platform renders a shadow copy',
+    };
+  }
+
+  if (match === null) {
     return {
       verdict: 'FAILED',
       reason: `no element with accessible name "${intent.label}" found in the fresh observation`,
     };
   }
+
+  const el = match.el;
 
   // Role check: does the control realize the intended semantic type?
   const roles = expectedRoles(intent.canonical_type);
@@ -171,34 +232,71 @@ export function compareIntent(obs: Observation, intent: IntentRecord): VerdictRe
     }
   }
 
-  // Range: re-read after type finalization (criterion 9). The range itself is
-  // not always exposed in the AX tree, so we only flag a HARD absence when the
-  // intent has a range and the element carries no numeric affordance at all.
-  // This is intentionally conservative: a missing range read is AMBIGUOUS.
+  // Range (criterion 9). The observed range now comes from PERCEIVE's
+  // ElementState. A numeric control carrying NO range when the intent
+  // declares one is the silent-discard trap, not a pass.
   if (intent.range_units) {
-    // The AX tree does not reliably expose min/max/units. We cannot confirm
-    // the range from the Observation alone; the caller (ACT/VERIFY pipeline)
-    // must supply a dedicated range read-back. Here we mark it as a soft
-    // signal: if the element is a spinbutton/textbox, the range is plausibly
-    // present but unverifiable from this observation.
-    if (el.role === 'spinbutton' || el.role === 'textbox') {
-      // Range plausibly present; do not fail. The dedicated range read-back
-      // (S3) is the authoritative check.
-    } else {
+    const observed = el.state.range;
+    const wanted = intent.range_units;
+
+    if (!observed || (observed.min === undefined && observed.max === undefined)) {
       return {
         verdict: 'AMBIGUOUS',
         reason:
-          `element "${intent.label}" has role "${el.role}" which cannot carry a ` +
-          `range, but intent specifies range ${intent.range_units.min}-${intent.range_units.max}`,
+          `element "${intent.label}" declares no range bounds, but intent ` +
+          `specifies ${wanted.min}-${wanted.max}`,
         suspected_trap:
-          'range read after type set: the control type may not hold a range, ' +
-          'or the platform silently discarded the range on type change',
+          'range absent after type set: the platform may have silently ' +
+          'discarded the range when the control type changed, or it does not ' +
+          'expose bounds in the accessibility tree',
       };
+    }
+
+    if (observed.min !== wanted.min || observed.max !== wanted.max) {
+      return {
+        verdict: 'AMBIGUOUS',
+        reason:
+          `element "${intent.label}" has range ${observed.min}-${observed.max} ` +
+          `but intent specifies ${wanted.min}-${wanted.max}`,
+        suspected_trap:
+          'range mismatch: the platform may have clamped, rounded, or ' +
+          'partially applied the bounds',
+      };
+    }
+
+    // Units are not an ARIA concept. Look for the unit string in the
+    // accessible name. Absence is AMBIGUOUS, never FAILED — units are often
+    // rendered presentationally and may be genuinely present but unobservable.
+    if (wanted.units) {
+      const haystack = normaliseLabel(el.name);
+      if (!haystack.includes(wanted.units.toLowerCase())) {
+        return {
+          verdict: 'AMBIGUOUS',
+          reason:
+            `element "${intent.label}" does not expose the unit "${wanted.units}" ` +
+            `in its accessible name`,
+          suspected_trap:
+            'units may be rendered presentationally and not exposed to the ' +
+            'accessibility tree, or they were not applied',
+        };
+      }
     }
   }
 
-  // Required flag: not reliably exposed in the AX tree; skip (the dedicated
-  // required read-back in S3 is authoritative). We do not fail on it here.
+  // Required flag (criterion 7). Now observable via ElementState. An absent
+  // observation is not a contradiction: some platforms express requiredness
+  // only visually. A PRESENT observation that disagrees is a real mismatch.
+  if (el.state.required !== undefined && el.state.required !== intent.required) {
+    return {
+      verdict: 'AMBIGUOUS',
+      reason:
+        `element "${intent.label}" reports required=${el.state.required} but ` +
+        `intent declares required=${intent.required}`,
+      suspected_trap:
+        'required flag not applied, or silently reset when the control type ' +
+        'was changed',
+    };
+  }
 
   return {
     verdict: 'VERIFIED',
@@ -220,24 +318,37 @@ export function compareIntent(obs: Observation, intent: IntentRecord): VerdictRe
  * construction.
  */
 export function checkFirst(obs: Observation, intent: IntentRecord): VerdictResult {
-  const el = findByName(obs, intent.label);
-  if (!el) {
+  const match = resolveByName(obs, intent.label, intent.range_units?.units);
+
+  if (match === 'ambiguous') {
+    return {
+      verdict: 'AMBIGUOUS',
+      reason: `more than one existing element resolves to "${intent.label}"`,
+      suspected_trap: 'a previous run may have built this field more than once',
+    };
+  }
+
+  if (match === null) {
     return {
       verdict: 'FAILED',
       reason: `no existing element named "${intent.label}" (build it)`,
     };
   }
+
   const roles = expectedRoles(intent.canonical_type);
-  if (roles.includes(el.role)) {
+  if (roles.includes(match.el.role)) {
     return {
       verdict: 'VERIFIED',
-      reason: `element "${intent.label}" already exists with role "${el.role}" (skip)`,
+      reason:
+        `element "${intent.label}" already exists with role "${match.el.role}" (skip)` +
+        (match.exact ? '' : ' [matched after label normalisation]'),
     };
   }
+
   return {
     verdict: 'AMBIGUOUS',
     reason:
-      `element "${intent.label}" exists but with role "${el.role}", not ` +
+      `element "${intent.label}" exists but with role "${match.el.role}", not ` +
       `[${roles.join(', ')}]`,
     suspected_trap: 'a same-named element exists with the wrong type',
   };

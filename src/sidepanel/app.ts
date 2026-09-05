@@ -10,6 +10,8 @@
  */
 
 import type { CapabilityReport, BindingRecord, ContractOpId, CanonicalType } from '../shared/contract';
+import type { TreeSummary } from '../engine/reconcile';
+import type { JournalExport } from '../shared/messages';
 import { CANONICAL_TYPES } from '../shared/contract';
 import type {
   EscalationItem,
@@ -27,6 +29,9 @@ let irJson: string | null = null;
 let isRunning = false;
 let isPaused = false;
 let escalationQueue: EscalationItem[] = [];
+/** Once the build is over, the queue is a review pile rather than a gate, and
+ *  the banner should say so instead of implying something is still waiting. */
+let buildFinished = false;
 let runtimeLog: Array<{ timestamp: number; event: string; detail: string }> = [];
 
 // ---------------------------------------------------------------------------
@@ -155,6 +160,12 @@ chrome.runtime.onMessage.addListener((message) => {
   if (!message?.type) return;
 
   switch (message.type) {
+    case 'RECONCILE_SUMMARY':
+      renderReconcileSummary(message.summary, message.deepReconcileAvailable);
+      break;
+    case 'PARKED_REVIEW':
+      renderParkedReview(message.items);
+      break;
     case 'PREFLIGHT_REPORT':
       handlePreflightReport(message.report, message.plan);
       break;
@@ -250,30 +261,125 @@ function handleEscalation(item: EscalationItem): void {
   renderEscalationItem(item);
   logEvent('escalation', `${item.fieldLabel} (${item.canonicalType}): ${item.reason}`);
 
-  // Automatically switch to the queue tab so the human sees the prompt immediately
-  switchTab('queue');
+  // Jump to the queue only when the build is actually waiting. Parked items
+  // used to steal the tab mid-run, which made a long build feel like a stream
+  // of emergencies when nothing was blocked.
+  if (item.blocking) switchTab('queue');
+}
+
+/** Placeholders the orchestrator uses when an escalation is about a whole form
+ *  or a whole visit rather than one field. They should never reach the screen. */
+function isScopePlaceholder(v: string): boolean {
+  return !v || v.startsWith('(');
+}
+
+/** Visit › Form › Field, with the deepest real level emphasised. This is the
+ *  first line on every card: the commonest complaint about the old queue was
+ *  not knowing which form an item belonged to. */
+function locationLine(item: EscalationItem): string {
+  const parts = [item.visitName, item.formName, item.fieldLabel]
+    .filter((p) => p && !isScopePlaceholder(p));
+  if (parts.length === 0) return '<b>This study</b>';
+  const leaf = parts.pop()!;
+  const trail = parts.map((p) => `${esc(p)}<span class="sep">›</span>`).join('');
+  return `${trail}<b>${esc(leaf)}</b>`;
+}
+
+/** A short title for what went wrong. The location line already says WHERE,
+ *  so this says WHAT — the old card led with the field name and repeated it. */
+function headline(item: EscalationItem): string {
+  if (item.blastRadius && item.blastRadius.fields > 1) return 'Type mapping unresolved';
+  switch (item.phase) {
+    case 'binding':   return 'No matching control found';
+    case 'acting':    return 'Could not confirm the action worked';
+    case 'verifying': return 'What was built does not match the file';
+    default:          return 'Needs a decision';
+  }
+}
+
+/** Changing the canonical type only means something when the item IS a type
+ *  decision. Offering it on a whole-form failure invites a meaningless answer. */
+function offersTypeChange(item: EscalationItem): boolean {
+  if (isScopePlaceholder(item.fieldLabel)) return false;
+  return item.phase === 'binding' || (item.blastRadius?.fields ?? 0) > 1;
+}
+
+/** What the buttons will actually do to THIS item, in plain words.
+ *  Keyed off the phase, because "could not build it" and "built it but it
+ *  does not match" leave the study in genuinely different states. */
+function actionExplanation(item: EscalationItem): string {
+  const n = item.blastRadius?.fields ?? 0;
+  if (n > 1) {
+    return `Approve keeps the agent's choice for all ${n} fields of this type. ` +
+           `Change lets you pick the right control and it rebuilds them.`;
+  }
+  switch (item.phase) {
+    case 'acting':
+      return item.blocking
+        ? 'Nothing here has been built yet, and the build will not go past this until you answer.'
+        : 'This was not built — it is missing from the study. Approving records the gap; it will not be retried.';
+    case 'verifying':
+      return 'It is already in the study but does not match the file. ' +
+             'Approving leaves it exactly as it is.';
+    case 'binding':
+      return item.blocking
+        ? 'Every field of this type is stuck until you answer.'
+        : 'No control matched, so this field was left out.';
+    default:
+      return 'Approving records your decision in the audit trail.';
+  }
 }
 
 function renderEscalationItem(item: EscalationItem): void {
-  const container = $('queue-items')!;
+  const container = $(item.blocking ? 'queue-blocking' : 'queue-parked')!;
   const el = document.createElement('div');
-  el.className = 'escalation-item';
+  el.className = `escalation-item ${item.blocking ? 'blocking' : 'parked'}`;
   el.dataset.key = item.key;
 
+  // Blast radius turns 195 confirmations into at most 13 decisions: a type
+  // mapping answered once settles every field of that type.
+  const radius = item.blastRadius
+    ? `<div class="radius" style="font-size:11px;color:var(--text-muted);margin-top:4px;">` +
+      `Affects ${item.blastRadius.fields} field${item.blastRadius.fields === 1 ? '' : 's'} ` +
+      `across ${item.blastRadius.forms} form${item.blastRadius.forms === 1 ? '' : 's'}. ` +
+      `Answering once settles all of them.</div>`
+    : '';
+
+  const skipLabel = item.blastRadius && item.blastRadius.fields > 1
+    ? `Skip these ${item.blastRadius.fields}`
+    : 'Skip it';
+
+  // The type badge is only meaningful when the item is actually about a field
+  // of that type. On a whole-form or whole-visit escalation it is noise.
+  const typeBadge = isScopePlaceholder(item.fieldLabel)
+    ? ''
+    : `<span class="type-badge">${esc(item.canonicalType)}</span>`;
+
   el.innerHTML = `
+    <div class="loc">${locationLine(item)}</div>
     <div class="header">
-      <span class="field-name">${item.fieldLabel}</span>
-      <span class="type-badge">${item.canonicalType}</span>
+      <span class="field-name">${esc(headline(item))}</span>
+      ${typeBadge}
     </div>
-    <div class="context">${item.visitName} → ${item.formName}</div>
-    <div class="reason">⚠ ${item.reason}</div>
-    ${item.suspectedTrap ? `<div class="trap">🪤 ${item.suspectedTrap}</div>` : ''}
-    ${item.evidence.length > 0 ? `<div class="evidence">${item.evidence.join('<br>')}</div>` : ''}
+    <div class="reason">${esc(item.reason)}</div>
+    ${item.suspectedTrap ? `<div class="trap">Why this happens: ${esc(item.suspectedTrap)}</div>` : ''}
+    ${radius}
+    <div class="ask">${esc(actionExplanation(item))}</div>
+    ${item.evidence.length > 0
+      ? `<details class="evidence">
+           <summary>What the agent saw (${item.evidence.length})</summary>
+           <div class="body">${item.evidence.map(esc).join('<br>')}</div>
+         </details>`
+      : ''}
     <div class="btn-group">
       <button class="btn btn-sm btn-primary" data-action="approve" data-key="${item.key}">✓ Approve</button>
-      <button class="btn btn-sm btn-warning" data-action="override" data-key="${item.key}">✎ Override</button>
-      <button class="btn btn-sm" data-action="skip" data-key="${item.key}">⊘ Skip</button>
+      ${offersTypeChange(item)
+        ? `<button class="btn btn-sm btn-warning" data-action="override" data-key="${item.key}">✎ Change type</button>`
+        : ''}
+      <button class="btn btn-sm" data-action="skip" data-key="${item.key}">⊘ ${skipLabel}</button>
     </div>
+    <input data-role="note" placeholder="Note (optional, recorded in the audit trail)"
+           style="width:100%;margin-top:6px;padding:4px;font-size:11px;box-sizing:border-box;">
   `;
 
   // Action handlers.
@@ -288,19 +394,53 @@ function renderEscalationItem(item: EscalationItem): void {
         return;
       }
 
-      sendDecision(key, { action, note: `human ${action}` });
+      const noteInput = el.querySelector('[data-role="note"]') as HTMLInputElement | null;
+      const note = noteInput?.value.trim();
+      sendDecision(key, { action, note: note || `human ${action}` });
       el.remove();
       escalationQueue = escalationQueue.filter((i) => i.key !== key);
       updateQueueBadge();
+      updateQueueStatus();
     });
   });
 
   container.appendChild(el);
+  updateQueueStatus();
+}
 
-  // Update queue status.
-  $('queue-status')!.className = 'status-banner paused';
-  $('queue-status')!.textContent = `${escalationQueue.length} item(s) need your input`;
-  $('queue-actions')!.classList.toggle('hidden', escalationQueue.length < 3);
+/** One place that decides what the queue tab says about itself. Blocking and
+ *  parked items are counted separately because they ask different things of
+ *  the reviewer: one halts the build, the other is a to-read pile. */
+function updateQueueStatus(): void {
+  const blocking = escalationQueue.filter((i) => i.blocking).length;
+  const parked = escalationQueue.length - blocking;
+
+  $('queue-blocking-group')!.classList.toggle('hidden', blocking === 0);
+  $('queue-parked-group')!.classList.toggle('hidden', parked === 0);
+  $('queue-legend')!.classList.toggle('hidden', escalationQueue.length === 0);
+  $('queue-blocking-count')!.textContent = String(blocking);
+  $('queue-parked-count')!.textContent = String(parked);
+  $('queue-actions')!.classList.toggle('hidden', parked < 3);
+
+  const status = $('queue-status')!;
+  if (buildFinished) {
+    status.className = 'status-banner idle';
+    status.textContent = parked + blocking === 0
+      ? 'Build finished. Nothing needed review.'
+      : `Build finished. ${parked + blocking} item${parked + blocking === 1 ? '' : 's'} to review — ` +
+        `nothing is waiting on you.`;
+  } else if (blocking > 0) {
+    status.className = 'status-banner paused';
+    status.textContent = parked > 0
+      ? `Build paused — ${blocking} to answer now, ${parked} to review later.`
+      : `Build paused — ${blocking} ${blocking === 1 ? 'item needs' : 'items need'} your answer.`;
+  } else if (parked > 0) {
+    status.className = 'status-banner idle';
+    status.textContent = `Nothing is blocking the build. ${parked} ${parked === 1 ? 'item' : 'items'} parked for review.`;
+  } else {
+    status.className = 'status-banner idle';
+    status.textContent = 'No escalations yet';
+  }
 }
 
 function showTypeOverrideDialog(key: string, currentType: CanonicalType): void {
@@ -337,6 +477,7 @@ function showTypeOverrideDialog(key: string, currentType: CanonicalType): void {
     item.remove();
     escalationQueue = escalationQueue.filter((i) => i.key !== key);
     updateQueueBadge();
+    updateQueueStatus();
   });
 }
 
@@ -345,15 +486,19 @@ function sendDecision(key: string, decision: HumanDecision): void {
   logEvent('human_decision', `${key}: ${decision.action}${decision.overrideType ? ` -> ${decision.overrideType}` : ''}`);
 }
 
-// Approve all remaining.
+// Approve every PARKED item. Blocking items are deliberately excluded: they
+// are the handful of questions the build genuinely could not answer, and
+// sweeping them up with one click is how a real decision gets rubber-stamped.
 $('approve-all-btn')!.addEventListener('click', () => {
-  for (const item of [...escalationQueue]) {
-    sendDecision(item.key, { action: 'approve', note: 'bulk approve' });
+  const parked = escalationQueue.filter((i) => !i.blocking);
+  for (const item of parked) {
+    sendDecision(item.key, { action: 'approve', note: 'bulk approve (parked)' });
   }
-  $('queue-items')!.innerHTML = '';
-  escalationQueue = [];
+  $('queue-parked')!.innerHTML = '';
+  escalationQueue = escalationQueue.filter((i) => i.blocking);
   updateQueueBadge();
-  logEvent('bulk_approve', 'all remaining');
+  updateQueueStatus();
+  logEvent('bulk_approve', `${parked.length} parked item(s)`);
 });
 
 function updateQueueBadge(): void {
@@ -466,3 +611,133 @@ function logEvent(event: string, detail: string): void {
     // Service worker not ready yet -- that's fine.
   }
 })();
+
+
+// ---------------------------------------------------------------------------
+// Reconcile summary (pre-flight): what is already there.
+// ---------------------------------------------------------------------------
+
+function esc(v: string): string {
+  const d = document.createElement('div');
+  d.textContent = v;
+  return d.innerHTML;
+}
+
+function renderReconcileSummary(summary: TreeSummary, deepAvailable: boolean): void {
+  const card = $('reconcile-card')!;
+  const body = $('reconcile-summary')!;
+  card.classList.remove('hidden');
+
+  const toBuild = summary.formAppearancesToCreate.length;
+  const rows: string[] = [
+    `<div><strong>${summary.visitsPresent} of ${summary.visitsWanted}</strong> visits already exist.</div>`,
+    `<div><strong>${summary.formAppearancesPresent} of ${summary.formAppearancesWanted}</strong> form appearances present.</div>`,
+    `<div><strong>${toBuild}</strong> form${toBuild === 1 ? '' : 's'} to create.</div>`,
+  ];
+
+  if (summary.visitsToCreate.length > 0) {
+    rows.push(
+      `<div style="font-size:11px;color:var(--text-muted);margin-top:6px;">` +
+      `Visits to create: ${summary.visitsToCreate.map(esc).join(', ')}</div>`,
+    );
+  }
+
+  if (!deepAvailable) {
+    // Stating the limitation is the point. Silently degrading here would mean
+    // a re-run cannot tell an already-built field from a missing one.
+    rows.push(
+      `<div class="trap" style="margin-top:8px;">⚠ <strong>Field-level reconciliation unavailable.</strong> ` +
+      `This platform's form contents could not be enumerated, so a re-run cannot ` +
+      `detect fields that already exist and may create duplicates.</div>`,
+    );
+  }
+
+  body.innerHTML = rows.join('');
+}
+
+// ---------------------------------------------------------------------------
+// Parked review: the non-blocking pile, cleared in one sitting at the end.
+// ---------------------------------------------------------------------------
+
+function renderParkedReview(items: EscalationItem[]): void {
+  buildFinished = true;
+  for (const item of items) {
+    if (!escalationQueue.some((q) => q.key === item.key)) {
+      escalationQueue.push(item);
+      renderEscalationItem(item);
+    }
+  }
+  updateQueueBadge();
+  updateQueueStatus();
+}
+
+// ---------------------------------------------------------------------------
+// Rung 2 API key. Stored locally; never bundled, never sent anywhere but the
+// Anthropic API.
+// ---------------------------------------------------------------------------
+
+async function refreshKeyStatus(justChanged = false): Promise<void> {
+  const el = $('key-status');
+  if (!el) return;
+  const stored = await chrome.storage.local.get('openRouterApiKey');
+  const has = typeof stored?.openRouterApiKey === 'string' && stored.openRouterApiKey.length > 0;
+  el.textContent = has
+    ? (justChanged ? 'Key saved. AI assist enabled.' : 'Key configured. AI assist enabled.')
+    : 'No key. Ambiguous types will be escalated instead.';
+}
+
+$('save-key')?.addEventListener('click', async () => {
+  const input = $('api-key') as HTMLInputElement | null;
+  if (!input) return;
+  const value = input.value.trim();
+  if (!value) return;
+  await chrome.storage.local.set({ openRouterApiKey: value });
+  input.value = '';
+  await refreshKeyStatus(true);
+});
+
+$('clear-key')?.addEventListener('click', async () => {
+  await chrome.storage.local.remove('openRouterApiKey');
+  await refreshKeyStatus(true);
+});
+
+void refreshKeyStatus();
+
+// ---------------------------------------------------------------------------
+// Journal export: the provenance record.
+// ---------------------------------------------------------------------------
+
+function download(filename: string, content: string, mime: string): void {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function fetchJournal(): Promise<JournalExport | null> {
+  const res = await chrome.runtime.sendMessage({ type: 'GET_JOURNAL' });
+  if (!res?.ok) {
+    const status = $('report-status');
+    if (status) {
+      status.className = 'status-banner idle';
+      status.textContent = res?.error ?? 'No journal yet — start a run first.';
+    }
+    return null;
+  }
+  return res as JournalExport;
+}
+
+$('export-jsonl')?.addEventListener('click', async () => {
+  const j = await fetchJournal();
+  if (!j) return;
+  download(`build-${j.runId}.jsonl`, j.jsonl, 'application/x-ndjson');
+});
+
+$('export-report')?.addEventListener('click', async () => {
+  const j = await fetchJournal();
+  if (!j) return;
+  download(`build-report-${j.runId}.html`, j.html, 'text/html');
+});

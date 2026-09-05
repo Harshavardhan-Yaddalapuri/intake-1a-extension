@@ -117,6 +117,7 @@ export class TabDriver {
   private async sendToTab<T>(message: Record<string, unknown>): Promise<T> {
     const maxRetries = 3;
     let lastError: unknown;
+    let reinjected = false;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
@@ -125,16 +126,44 @@ export class TabDriver {
       } catch (err) {
         lastError = err;
         const errStr = String(err);
-        // Content script not injected yet -- wait and retry.
-        if (
+        const noReceiver =
           errStr.includes('Receiving end does not exist') ||
-          errStr.includes('Could not establish connection')
-        ) {
-          if (attempt < maxRetries) {
-            await this.sleep(500 * Math.pow(2, attempt));
-            continue;
+          errStr.includes('Could not establish connection');
+
+        if (noReceiver && attempt < maxRetries) {
+          // "No receiver" has two different causes that look identical from
+          // here: the content script hasn't finished loading yet (a timing
+          // race on a fresh navigation), or it was never going to appear at
+          // all because the tab predates this content script -- most commonly
+          // because the extension was reloaded (a new build) while the tab
+          // was already open. Chrome does not retroactively inject a
+          // manifest-declared content script into an already-open tab, so
+          // resending the same message forever, as this loop used to, fails
+          // identically every time in that case.
+          //
+          // Re-inject ourselves, once, before resorting to a bare wait-and-
+          // retry. The "scripting" permission plus the <all_urls> host
+          // permission already granted for content_scripts cover this. If
+          // injection itself throws (a chrome:// tab, a closed tab), fall
+          // through to the timing-race path below rather than treating that
+          // as fatal here -- the eventual retryable send will surface the
+          // real error.
+          if (!reinjected) {
+            reinjected = true;
+            try {
+              await chrome.scripting.executeScript({
+                target: { tabId: this.tabId },
+                files: ['content.js'],
+              });
+              continue; // Retry immediately; the script is present now.
+            } catch {
+              // Fall through to the timing-race wait below.
+            }
           }
+          await this.sleep(500 * Math.pow(2, attempt));
+          continue;
         }
+
         // Other errors are hard failures.
         throw new TabDriverError(`sendToTab failed: ${errStr}`);
       }

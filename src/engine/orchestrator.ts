@@ -17,7 +17,7 @@
  *   - Pre-flight runs discovery probes before the main execution loop.
  */
 
-import { diffObservations, type Observation } from '../perceive/core';
+import { diffObservations, type Observation, type ObservationElement } from '../perceive/core';
 import type { Ir, IrVisit, IrForm, IrField } from '../plan/ir';
 import type {
   Plan,
@@ -30,6 +30,7 @@ import { compilePlan, linearize } from '../plan/compiler';
 import { parseIRJson } from '../plan/ir';
 import type {
   BindingRecord,
+  BindingRung,
   CanonicalType,
   CapabilityReport,
   ContractOpId,
@@ -66,6 +67,40 @@ import {
 } from '../bind/rung0';
 import { ProbeRunner } from './probe-runner';
 import { analyzeCommit } from '../bind/rung1';
+import {
+  LEXICAL_HINTS,
+  enumerateActionable,
+  enumerateActions,
+  enumerateByRoles,
+  rankCandidates,
+} from '../bind/ranking';
+import {
+  rankCommitCandidates,
+  readObservedFields,
+  bindFormListFields,
+  resolveFormOpenCandidates,
+  surfaceShowsForm,
+  rankAscendCandidates,
+  atVisitList,
+} from '../bind/rung0';
+import { Journal, type IrSource } from './journal';
+import { rankWithLlm } from '../bind/rung2';
+import { makeTypeBinding, inspectPlacedControl, classifyTypeFromProbe } from '../bind/rung1';
+import {
+  reconcileForm,
+  summariseTree,
+  normaliseLabel,
+  type FormReconcileResult,
+  type TreeSummary,
+} from './reconcile';
+
+/** Does this name read like a working-copy / persisted-state indicator?
+ *  Weak corroboration only -- analyzeCommit's structural before/after
+ *  comparison is the authoritative signal. Word list lives in ranking.ts. */
+function matchesStatusHint(name: string): boolean {
+  const n = name.toLowerCase();
+  return LEXICAL_HINTS.status.some((w) => n.includes(w));
+}
 
 // ---------------------------------------------------------------------------
 // Orchestrator.
@@ -82,6 +117,12 @@ export interface OrchestratorCallbacks {
   onEscalation: (item: EscalationItem) => void;
   /** Called when the run completes. */
   onComplete: (summary: RunSummary) => void;
+  /** Called when the shallow reconcile pass completes, before execution, so
+   *  the human authorises the run from a concrete statement of the work. */
+  onReconcileSummary?: (summary: TreeSummary, deepAvailable: boolean) => void;
+  /** Called at the end of the run with the parked (non-blocking) escalations,
+   *  to be cleared in one review session. */
+  onParkedReview?: (items: EscalationItem[]) => void;
 }
 
 export class Orchestrator {
@@ -111,6 +152,20 @@ export class Orchestrator {
   private currentVisitId: string | null = null;
   private currentFormId: string | null = null;
 
+  /** Append-only provenance log. Every act writes one record. */
+  private journal: Journal;
+  /** Per-form reconcile result, populated when the form is opened. */
+  private formReconcile: Map<string, FormReconcileResult> = new Map();
+  /** Shallow-pass survey of the visit/form tree, from pre-flight. */
+  private treeSummary: TreeSummary | null = null;
+  /** Whether form.list_fields bound. When false, field-level reconciliation is
+   *  unavailable and the run must say so rather than silently degrading. */
+  private deepReconcileAvailable = false;
+  /** Non-blocking escalations, reviewed in one sitting at the end. */
+  private parked: EscalationItem[] = [];
+  /** One decision per group settles every item sharing that group key. */
+  private groupDecisions: Map<string, HumanDecision> = new Map();
+
   /** The IR data, keyed for quick lookup. */
   private irVisitMap: Map<string, IrVisit>;
   private irFormMap: Map<string, IrForm>;
@@ -128,6 +183,7 @@ export class Orchestrator {
     this.driver = new TabDriver(tabId);
     this.probeRunner = new ProbeRunner(this.driver);
     this.callbacks = callbacks;
+    this.journal = new Journal(`run-${Date.now()}`);
 
     // Build lookup maps from IR.
     this.irVisitMap = new Map(this.ir.visits.map((v) => [v.visit_id, v]));
@@ -185,7 +241,18 @@ export class Orchestrator {
     this.phase = 'executing';
     await this.executePlan();
 
-    // Phase 3: Done.
+    // Phase 3: clear the parked pile.
+    //
+    // Non-blocking escalations were set aside during the build so a 195-field
+    // run is not an interrupt-driven slog. They are reviewed here, in one
+    // sitting, before the run is called done.
+    if (this.parked.length > 0) {
+      this.phase = 'paused';
+      this.callbacks.onParkedReview?.(this.parked.slice());
+      await this.waitForResume();
+    }
+
+    // Phase 4: Done.
     this.phase = 'done';
     this.runState.status = 'done';
     await saveRunState(this.adapter, this.runState);
@@ -217,7 +284,24 @@ export class Orchestrator {
       pending.resolve(decision);
       this.escalationQueue.delete(key);
     }
+
+    // A decision on a grouped escalation settles every item in that group.
+    // 13 canonical types means at most 13 type decisions, never 195.
+    const resolved =
+      this.parked.find((p) => p.key === key) ?? null;
+    const groupKey = resolved?.groupKey;
+    if (groupKey) {
+      this.groupDecisions.set(groupKey, decision);
+      for (const [otherKey, waiter] of [...this.escalationQueue]) {
+        const other = this.parked.find((p) => p.key === otherKey);
+        if (other?.groupKey === groupKey) {
+          waiter.resolve(decision);
+          this.escalationQueue.delete(otherKey);
+        }
+      }
+    }
   }
+
 
   /** Get the current phase. */
   getPhase(): OrchestratorPhase { return this.phase; }
@@ -238,6 +322,9 @@ export class Orchestrator {
           visitName: visit?.name ?? item.visit_id,
           canonicalType: (field?.canonical_type ?? 'text') as CanonicalType,
           reason: item.escalation_reason ?? 'unknown',
+          // Reconstructed from the live queue: anything still waiting on a
+          // human by definition blocked the run.
+          blocking: true,
           evidence: [],
           phase: 'verifying',
         });
@@ -291,6 +378,23 @@ export class Orchestrator {
       }
     }
 
+    // Bind field enumeration, which reconciliation depends on. If it cannot
+    // bind, field-level reconciliation is genuinely unavailable and the run
+    // must SAY so rather than silently degrading -- a re-run would then be
+    // unable to tell an already-built field from a missing one.
+    const listBinding = bindFormListFields(observation);
+    if (listBinding) {
+      this.bindings['form.list_fields'] = listBinding;
+      allBindings['form.list_fields'] = listBinding;
+      this.deepReconcileAvailable = listBinding.status === 'bound';
+    }
+
+    // Shallow reconcile: walk the visit list and, for each visit that exists,
+    // the form names under it. Bounded by visit and form-appearance count, not
+    // field count, so the pre-flight screen gets a concrete work statement
+    // without paying to enumerate 195 fields before anything happens.
+    await this.runShallowReconcile();
+
     return {
       platform_origin: observation.url,
       generated_at: Date.now(),
@@ -298,6 +402,123 @@ export class Orchestrator {
       needs_human: needsHuman,
       unbindable,
     };
+  }
+
+  /**
+   * Survey the visit/form tree without descending into forms.
+   *
+   * Best-effort: navigation on an unknown platform can fail, and a visit that
+   * cannot be opened is simply reported as absent, which errs toward building
+   * rather than skipping. Recall matters more than precision.
+   */
+  private async runShallowReconcile(): Promise<void> {
+    const presentByVisit: Record<string, string[]> = {};
+
+    try {
+      for (const visit of this.ir.visits) {
+        const opened = await this.tryNavigateToVisitByName(visit.name);
+        if (!opened) continue;
+        const { observation } = await this.driver.perceiveAfterSettle(200);
+        presentByVisit[visit.name] = enumerateActionable(observation)
+          .map((e) => e.name)
+          .filter((n) => n.length > 0);
+      }
+    } catch {
+      // A failed survey is not a failed run: leave the tree summary partial
+      // and let the deep pass decide per form.
+    }
+
+    this.treeSummary = summariseTree(
+      this.ir.visits.map((v) => ({
+        visit_id: v.visit_id,
+        name: v.name,
+        forms: v.forms.map((f) => ({ form_id: f.form_id, name: f.name })),
+      })),
+      presentByVisit,
+    );
+
+    // Cached progress is a fast path, never a trust boundary. chrome.storage
+    // persists across a target reset, so runState may claim a visit's fields
+    // are already 'verified' when the LIVE platform just showed that visit
+    // does not exist at all -- the previous run happened against a version of
+    // the platform that no longer exists. Reconciling the cache against this
+    // shallow pass is what makes chrome.storage.local.clear() unnecessary
+    // between runs: only genuinely stale cache is discarded, and a real
+    // resume against an unchanged platform keeps its progress.
+    await this.invalidateStaleCache(presentByVisit);
+
+    this.journal.note(
+      'preflight',
+      `${this.treeSummary.visitsPresent} of ${this.treeSummary.visitsWanted} visits and ` +
+      `${this.treeSummary.formAppearancesPresent} of ${this.treeSummary.formAppearancesWanted} ` +
+      `form appearances already exist` +
+      (this.deepReconcileAvailable
+        ? ''
+        : '; field-level reconciliation is UNAVAILABLE on this platform'),
+    );
+
+    this.callbacks.onReconcileSummary?.(this.treeSummary, this.deepReconcileAvailable);
+  }
+
+  /**
+   * Discard cached progress for any visit the live platform just showed does
+   * not exist.
+   *
+   * A cache entry is trustworthy only as long as the platform it describes is
+   * the same platform state that produced it. `presentByVisit` is this run's
+   * OWN live observation, taken moments ago, so it is authoritative: if a
+   * visit is absent from it, nothing under that visit can genuinely be built,
+   * regardless of what an earlier session's runState claims.
+   *
+   * Deliberately coarse: a full run reset (cursor back to 0) rather than a
+   * surgical per-item repair. Re-deriving from reconcile is cheap -- adopt
+   * decisions for anything the platform genuinely has are near-instant -- and
+   * correctness here matters far more than shaving a few redundant reconcile
+   * calls.
+   */
+  private async invalidateStaleCache(presentByVisit: Record<string, string[]>): Promise<void> {
+    const presentVisitNames = new Set(Object.keys(presentByVisit).map((n) => normaliseLabel(n)));
+    let invalidated = false;
+
+    for (const item of this.linearItems) {
+      const key = idempotencyKey(item.visit_id, item.form_id, item.field_id);
+      const record = this.runState.items[key];
+      if (!record || record.state === 'pending') continue;
+
+      if (!presentVisitNames.has(normaliseLabel(item.visit_name))) {
+        record.state = 'pending';
+        record.last_verdict = undefined;
+        record.rebind_count = 0;
+        invalidated = true;
+      }
+    }
+
+    if (invalidated) {
+      this.runState.cursor = 0;
+      this.journal.note(
+        'preflight',
+        'cached progress from a previous run referenced a visit the platform ' +
+        'no longer has; that progress was discarded rather than trusted',
+      );
+      await saveRunState(this.adapter, this.runState);
+    }
+  }
+
+  /** Navigate to a visit by its input-file name. Returns false when no visit
+   *  with that name is reachable, which means it does not exist yet. The name
+   *  comes from the input file, so matching against it is data, not a
+   *  hardcoded vocabulary guess. */
+  private async tryNavigateToVisitByName(name: string): Promise<boolean> {
+    const { observation } = await this.driver.perceiveAfterSettle(150);
+    const target = normaliseLabel(name);
+    const match = enumerateActionable(observation).find(
+      (e) => normaliseLabel(e.name) === target,
+    );
+    if (!match) return false;
+    const res = await this.driver.click(match.handle);
+    if (!res.ok) return false;
+    await this.sleep(250);
+    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -378,6 +599,40 @@ export class Orchestrator {
     const field = this.irFieldMap.get(item.field_id);
     if (!field) return;
 
+    // Reconcile decides whether this item needs building at all. Consulting it
+    // BEFORE any mutation is what makes a re-run a no-op and what stops the
+    // agent overwriting work someone may have done deliberately.
+    const reconciled = this.formReconcile.get(item.form_id);
+    const decision = reconciled?.decisions.find((d) => d.field_id === item.field_id);
+
+    if (decision?.action === 'adopt') {
+      const record = this.runState.items[itemKey];
+      if (record) {
+        record.state = 'verified';
+        record.last_verdict = 'VERIFIED';
+        await saveRunState(this.adapter, this.runState);
+      }
+      this.journal.adopted(this.sourceOf(item), decision.reason);
+      return;
+    }
+
+    if (decision?.action === 'escalate') {
+      await this.escalateItem(itemKey, 'verifying', {
+        key: itemKey,
+        fieldLabel: item.label,
+        formName: item.form_name,
+        visitName: item.visit_name,
+        canonicalType: item.canonical_type,
+        reason: decision.reason,
+        suspectedTrap:
+          `a field with this label already exists but its ${decision.mismatch} ` +
+          `differs; not modifying work that may have been done deliberately`,
+        evidence: [decision.reason],
+        phase: 'verifying',
+      }, /* blocking */ false);
+      return;
+    }
+
     const form = this.irFormMap.get(item.form_id);
     const visit = this.irVisitMap.get(item.visit_id);
 
@@ -406,8 +661,12 @@ export class Orchestrator {
         await this.executeFieldSetRange(item, itemKey, field);
         break;
       case 'type_refinement':
-        // Type refinement: re-verify that the type is correct after range setting.
+        // Settle the control's type BEFORE the range is written, so a type
+        // change cannot silently discard it.
         await this.executeTypeRefinement(item, itemKey, field, intent);
+        break;
+      case 'verify_range':
+        await this.executeVerifyRange(item, itemKey, field, intent);
         break;
       case 'set_coded_values':
         await this.executeFieldSetCodedValues(item, itemKey, field);
@@ -419,6 +678,50 @@ export class Orchestrator {
         await this.executeFieldSetSkipLogic(item, itemKey, field);
         break;
     }
+  }
+
+  /**
+   * Re-read a field's range once the type is final.
+   *
+   * The last step for any field carrying a range. Everything that could
+   * disturb the type has already run, so whatever the platform reports now is
+   * what the study will actually have. A range that has gone missing is the
+   * silent-discard trap and is parked for review rather than retried blindly —
+   * a blind retry would just set it again and lose it again.
+   */
+  private async executeVerifyRange(
+    item: LinearItem,
+    itemKey: string,
+    field: IrField,
+    intent: IntentRecord,
+  ): Promise<void> {
+    const { observation } = await this.driver.perceiveAfterSettle(200);
+    const verdict = compareIntent(observation, intent);
+
+    if (verdict.verdict === 'VERIFIED') {
+      await this.markVerified(itemKey, {
+        rung: 0,
+        evidence: [`range re-read after the type was final: ${verdict.reason}`],
+        reason: verdict.reason,
+      });
+      return;
+    }
+
+    await this.escalateItem(itemKey, 'verifying', {
+      key: itemKey,
+      fieldLabel: item.label,
+      formName: item.form_name,
+      visitName: item.visit_name,
+      canonicalType: item.canonical_type,
+      reason: verdict.reason,
+      suspectedTrap:
+        verdict.suspected_trap ??
+        'the range was set earlier but is absent now; the platform may have ' +
+        'discarded it when the control type was settled',
+      evidence: [verdict.reason],
+      verdict,
+      phase: 'verifying',
+    }, /* blocking */ false);
   }
 
   // -------------------------------------------------------------------------
@@ -457,17 +760,93 @@ export class Orchestrator {
       typeBinding = this.typeBindings[field.canonical_type];
     }
 
+    // Rung 2: the model narrows the field. It NEVER decides -- its top pick is
+    // placed and read back, and a disagreement escalates showing both views.
+    // With no key configured this rung is skipped entirely and the item goes
+    // straight to the human, so the build completes either way.
+    const rung2Evidence: string[] = [];
     if (!typeBinding) {
+      const stored = await chrome.storage.local.get('openRouterApiKey');
+      const apiKey: string | null =
+        typeof stored?.openRouterApiKey === 'string' ? stored.openRouterApiKey : null;
+
+      if (apiKey) {
+        const { observation: paletteObs } = await this.driver.perceive();
+        const pool = rankCandidates(enumerateActionable(paletteObs), { hint: 'palette' });
+        const llmRanked = await rankWithLlm(field.canonical_type, pool, {
+          apiKey,
+          fetch: (url, init) => globalThis.fetch(url as string, init as RequestInit),
+        });
+
+        if (llmRanked && llmRanked.length > 0) {
+          const pick = llmRanked[0];
+          const adjudication = await this.probeRunner.placeAndInspect(pick.el.handle);
+
+          if (adjudication.matchedTypes.includes(field.canonical_type)) {
+            const binding = makeTypeBinding(
+              field.canonical_type,
+              adjudication.probe,
+              pick.el.name,
+              pick.el.handle,
+            );
+            this.typeBindings[field.canonical_type] = binding;
+            typeBinding = binding;
+            this.journal.created(
+              this.sourceOf(item),
+              'field.add',
+              {
+                rung: 2,
+                evidence: [
+                  `rung 2 ranked "${pick.el.name}" first: ${pick.llmRationale}`,
+                  `probe confirmed: placing it produced role "${adjudication.probe.observedRole}"`,
+                ],
+                llm_rationale: pick.llmRationale,
+                llm_rank: pick.llmRank,
+              },
+              { verdict: 'VERIFIED', reason: 'probe confirmed the rung 2 ranking' },
+            );
+          } else {
+            // The model was confident and the platform disagreed. Carry BOTH
+            // opinions into the escalation so the human sees the conflict
+            // rather than a bare failure.
+            rung2Evidence.push(
+              `rung 2 suggested "${pick.el.name}" (${pick.llmRationale}), but placing it ` +
+              `produced role "${adjudication.probe.observedRole}", which does not realise ` +
+              `"${field.canonical_type}"`,
+            );
+          }
+        } else {
+          rung2Evidence.push('rung 2 could not rank the candidates; escalating');
+        }
+      } else {
+        rung2Evidence.push('rung 2 unavailable (no API key configured); escalating');
+      }
+    }
+
+    if (!typeBinding) {
+      // Every field of this canonical type is stuck behind this one answer,
+      // so it blocks -- and it groups, so answering settles all of them.
+      const affected = this.linearItems.filter(
+        (i) => i.kind === 'add' && i.canonical_type === field.canonical_type,
+      );
       await this.escalateItem(itemKey, 'binding', {
         key: itemKey,
+        groupKey: `type:${field.canonical_type}`,
+        blastRadius: {
+          fields: affected.length,
+          forms: new Set(affected.map((i) => i.form_id)).size,
+        },
         fieldLabel: field.label,
         formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
         visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
         canonicalType: field.canonical_type,
         reason: `No binding found for type "${field.canonical_type}" in the element palette after Rung 0 & Rung 1 probes`,
-        evidence: ['No palette button matched this canonical type structurally'],
+        evidence: [
+          'no palette control matched this canonical type structurally after rungs 0 and 1',
+          ...rung2Evidence,
+        ],
         phase: 'binding',
-      });
+      }, /* blocking */ true);
       return;
     }
 
@@ -485,6 +864,72 @@ export class Orchestrator {
     const diff = diffObservations(preObs, postObs);
     const elementAdded = diff.added.length > 0 || postObs.elements.length > preObs.elements.length;
 
+    // Adjudicate the type mapping against what ACTUALLY appeared.
+    //
+    // A rung 0 binding is a name guess: the ladder used to escalate only when
+    // no binding existed at all, so a confidently wrong guess was never
+    // challenged and every field of that type was built on it. Placing the
+    // control is itself the probe -- it has already happened here, so this
+    // costs nothing extra and needs no scratch control.
+    //
+    // Runs once per canonical type: a confirmed mapping is upgraded to
+    // `structural` and cached, so the cost is bounded by 13, not by 195.
+    if (elementAdded && typeBinding.confidence !== 'structural') {
+      const probe = inspectPlacedControl(preObs, postObs);
+      const classification = classifyTypeFromProbe(field.canonical_type, probe);
+
+      if (classification.matches) {
+        const paletteName = typeBinding.recipe[0]?.evidence_name ?? '';
+        const paletteEl = preObs.elements.find((e) => e.name === paletteName);
+        const upgraded = makeTypeBinding(
+          field.canonical_type, probe, paletteName, paletteEl?.handle ?? '',
+        );
+        this.typeBindings[field.canonical_type] = upgraded;
+        typeBinding = upgraded;
+        this.journal.note(
+          `${this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id} > ` +
+          `${this.irFormMap.get(item.form_id)?.name ?? item.form_id}`,
+          `"${paletteName}" confirmed as ${field.canonical_type} by read-back ` +
+          `(role ${probe.observedRole}); every later field of this type uses it.`,
+        );
+      } else {
+        // The name said one thing and the control says another. Behaviour wins,
+        // but the disagreement is the human's to settle -- and it settles for
+        // every field of this type at once.
+        const affected = this.linearItems.filter(
+          (i) => i.kind === 'add' && i.canonical_type === field.canonical_type,
+        );
+        await applyTransition(this.adapter, this.runState, itemKey, 'verify_failed');
+        await this.escalateItem(itemKey, 'binding', {
+          key: itemKey,
+          groupKey: `type:${field.canonical_type}`,
+          blastRadius: {
+            fields: affected.length,
+            forms: new Set(affected.map((i) => i.form_id)).size,
+          },
+          fieldLabel: field.label,
+          formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+          visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+          canonicalType: field.canonical_type,
+          suspectedTrap:
+            'a palette entry whose name suggests one type can place another; ' +
+            'names are a hint, the placed control is the evidence',
+          reason:
+            `Placed "${typeBinding.recipe[0]?.evidence_name}" for ` +
+            `${field.canonical_type} and a ${probe.observedRole || 'unrecognised'} ` +
+            `control appeared instead.`,
+          evidence: [
+            `expected role: ${expectedRolesForType(field.canonical_type).join(' | ')}`,
+            `observed role: ${probe.observedRole || 'none'}`,
+            classification.evidence,
+            ...typeBinding.evidence,
+          ],
+          phase: 'binding',
+        }, /* blocking */ true);
+        return;
+      }
+    }
+
     if (!actOk || !elementAdded) {
       await applyTransition(this.adapter, this.runState, itemKey, 'verify_failed');
       const record = this.runState.items[itemKey];
@@ -499,7 +944,7 @@ export class Orchestrator {
           evidence: typeBinding.evidence,
           binding: typeBinding,
           phase: 'verifying',
-        });
+        }, /* blocking */ false);
       }
     }
   }
@@ -671,7 +1116,7 @@ export class Orchestrator {
         evidence: [verdict.reason],
         verdict,
         phase: 'verifying',
-      });
+      }, /* blocking */ false);
     } else {
       await applyTransition(this.adapter, this.runState, itemKey, 'verify_failed');
       const record = this.runState.items[itemKey];
@@ -686,7 +1131,7 @@ export class Orchestrator {
           evidence: [verdict.reason],
           verdict,
           phase: 'verifying',
-        });
+        }, /* blocking */ false);
       }
     }
   }
@@ -741,34 +1186,86 @@ export class Orchestrator {
     const visit = this.irVisitMap.get(visitId);
     if (!visit) return;
 
-    // Navigate to study root first.
-    const { observation } = await this.driver.perceive();
-    const navBinding = this.bindings['nav.to_study_root'];
+    const visitNames = [...this.irVisitMap.values()].map((v) => v.name);
+    const createControl = this.bindings['visit.create']?.recipe?.[0]?.evidence_name;
 
-    if (navBinding && navBinding.recipe.length > 0) {
-      await this.executeRecipe(navBinding.recipe, null);
-      await this.sleep(500);
+    // Climb to the visit list, CONFIRMING arrival instead of assuming it.
+    // A single pre-bound "go to study root" click cannot do this job: on the
+    // supplied mock that control is the already-active nav tab and is inert at
+    // every depth, so the run silently stayed inside one visit and built every
+    // form into it.
+    const hops: string[] = [];
+    let reached = atVisitList(
+      (await this.driver.perceive()).observation, visitNames, createControl,
+    );
+    for (let hop = 0; hop < 4 && !reached; hop += 1) {
+      const { observation } = await this.driver.perceive();
+      const best = rankAscendCandidates(observation, visitNames)[0];
+      if (!best) break;
+      await this.driver.click(best.handle);
+      await this.sleep(450);
+      const { observation: after } = await this.driver.perceiveAfterSettle(200);
+      hops.push(best.name);
+      reached = atVisitList(after, visitNames, createControl);
     }
 
-    // Create the visit if it doesn't exist.
-    const { observation: rootObs } = await this.driver.perceive();
-    const visitLinks = rootObs.elements.filter(
-      (e) => (e.role === 'link' || e.role === 'button') && e.name === visit.name,
+    if (!reached) {
+      await this.escalateItem(`visit-nav:${visitId}`, 'acting', {
+        key: `visit-nav:${visitId}`,
+        fieldLabel: '(whole visit)',
+        canonicalType: 'text',
+        formName: '(none)',
+        visitName: visit.name,
+        suspectedTrap:
+          'The control that ascends is named after the level it leaves, so it ' +
+          'differs per level; a top-level nav item may look right and be inert.',
+        reason:
+          `Could not reach the visit list to open "${visit.name}". Nothing was ` +
+          `built for this visit rather than building it into whichever visit ` +
+          `was already open.`,
+        evidence: hops.length ? [`ascended via: ${hops.join(' -> ')}`] : ['no ascend candidate found'],
+        phase: 'acting',
+      }, /* blocking */ true);
+      return;
+    }
+
+    // Create the visit if it is not already listed.
+    const nameMatches = (o: Observation) => enumerateActionable(o).find(
+      (e) => normaliseLabel(e.name) === normaliseLabel(visit.name),
     );
 
-    if (visitLinks.length === 0) {
-      // Visit doesn't exist -- create it.
+    if (!nameMatches((await this.driver.perceive()).observation)) {
       await this.createVisit(visit);
+      await this.sleep(300);
     }
 
-    // Open the visit.
-    const { observation: afterCreate } = await this.driver.perceive();
-    const visitLink = afterCreate.elements.find(
-      (e) => (e.role === 'link' || e.role === 'button') && e.name === visit.name,
-    );
-    if (visitLink) {
-      await this.driver.click(visitLink.handle);
+    // Open it, then confirm THIS visit opened before recording that it did.
+    const { observation: listed } = await this.driver.perceiveAfterSettle(200);
+    const link = nameMatches(listed);
+    let opened = false;
+    if (link) {
+      await this.driver.click(link.handle);
       await this.sleep(500);
+      const { observation: after } = await this.driver.perceiveAfterSettle(250);
+      // We have descended out of the visit list into this visit's contents.
+      opened = !atVisitList(after, visitNames, createControl);
+    }
+
+    if (!opened) {
+      await this.escalateItem(`visit-open:${visitId}`, 'acting', {
+        key: `visit-open:${visitId}`,
+        fieldLabel: '(whole visit)',
+        canonicalType: 'text',
+        formName: '(none)',
+        visitName: visit.name,
+        reason:
+          `Reached the visit list but could not confirm "${visit.name}" opened` +
+          `${link ? '' : ' (it was not listed after creation)'}. Its forms are ` +
+          `not being built, to avoid adding them to another visit.`,
+        evidence: [`visit control ${link ? `"${link.name}" clicked` : 'not found'}`],
+        phase: 'acting',
+      }, /* blocking */ true);
+      return;
     }
 
     this.currentVisitId = visitId;
@@ -782,15 +1279,11 @@ export class Orchestrator {
     // Click the "add visit" button.
     if (createBinding.recipe.length > 0) {
       const { observation } = await this.driver.perceive();
-      const addBtn = observation.elements.find(
-        (e) => e.role === 'button' && (
-          (e.name.toLowerCase().includes('add') && e.name.toLowerCase().includes('visit')) ||
-          e.name === '+' ||
-          e.name.toLowerCase().includes('add') ||
-          e.name.toLowerCase().includes('phase') ||
-          e.name.toLowerCase().includes('new')
-        ),
-      );
+      const addPool = enumerateActionable(observation);
+      const addBtn = rankCandidates(addPool, { hint: 'visit_create' })[0]?.el;
+      // Remember the pre-dialog surface so the controls the dialog brings with
+      // it can be told apart from the page chrome that was always there.
+      this.preDialogObs = observation;
       if (addBtn) {
         await this.driver.click(addBtn.handle);
         await this.sleep(300);
@@ -799,38 +1292,28 @@ export class Orchestrator {
 
     // Fill in the visit name.
     const { observation: formObs } = await this.driver.perceive();
-    const nameInputs = formObs.elements.filter(
-      (e) => e.role === 'textbox' && (
-        e.name.toLowerCase().includes('name') || e.name.toLowerCase().includes('visit') ||
-        e.name.toLowerCase().includes('phase')
-      ),
-    );
-    if (nameInputs.length > 0) {
-      await this.driver.setValue(nameInputs[0].handle, visit.name);
+    const textPool = enumerateByRoles(formObs, ['textbox', 'searchbox']);
+    const nameBox = rankCandidates(textPool, { hint: 'name_input' })[0]?.el;
+    if (nameBox) {
+      await this.driver.setValue(nameBox.handle, visit.name);
     }
 
-    // Fill in visit window days.
-    const startInputs = formObs.elements.filter(
-      (e) => e.role === 'textbox' && (e.name.toLowerCase().includes('start') || e.name.toLowerCase().includes('window')),
-    );
-    const endInputs = formObs.elements.filter(
-      (e) => e.role === 'textbox' && (e.name.toLowerCase().includes('end') || e.name.toLowerCase().includes('window')),
-    );
-    if (startInputs.length > 0) {
-      await this.driver.setValue(startInputs[0].handle, String(visit.window_start_day));
+    // Fill in the visit window. Both bounds are ranked over the same pool and
+    // the top two distinct candidates are used, so a platform naming them
+    // anything at all still gets values written; the read-back confirms.
+    const startBox = rankCandidates(textPool, { hint: 'window_start' })[0]?.el;
+    const endCandidates = rankCandidates(textPool, { hint: 'window_end' });
+    const endBox = (endCandidates.find((c) => c.el.handle !== startBox?.handle) ?? endCandidates[0])?.el;
+    if (startBox && startBox.handle !== nameBox?.handle) {
+      await this.driver.setValue(startBox.handle, String(visit.window_start_day));
     }
-    if (endInputs.length > 0) {
-      await this.driver.setValue(endInputs[0].handle, String(visit.window_end_day));
+    if (endBox && endBox.handle !== nameBox?.handle && endBox.handle !== startBox?.handle) {
+      await this.driver.setValue(endBox.handle, String(visit.window_end_day));
     }
 
     // Click save.
     const { observation: saveObs } = await this.driver.perceive();
-    const saveBtn = saveObs.elements.find(
-      (e) => e.role === 'button' && (
-        e.name.toLowerCase().includes('save') || e.name.toLowerCase().includes('create') ||
-        e.name.toLowerCase().includes('freeze')
-      ),
-    );
+    const saveBtn = this.pickDialogCommit(saveObs);
     if (saveBtn) {
       await this.driver.click(saveBtn.handle, false);
       await this.sleep(500);
@@ -843,32 +1326,119 @@ export class Orchestrator {
     const form = this.irFormMap.get(formId);
     if (!form) return;
 
-    // Check if the form already exists in the current visit's document list.
-    const { observation } = await this.driver.perceive();
-    const formLink = observation.elements.find(
-      (e) => (e.role === 'link' || e.role === 'button' || e.role === 'cell') &&
-        (e.name === form.name || e.name.toLowerCase().includes(form.name.toLowerCase())),
-    );
+    // Sibling forms sharing this visit's list. Used to tell the list screen
+    // (many forms named) from a designer surface (one form named).
+    const siblings = (this.irVisitMap.get(visitId)?.forms ?? [])
+      .map((f) => f.name)
+      .filter((n) => n !== form.name);
 
-    if (!formLink) {
-      // Form doesn't exist -- create it.
+    // Does the form already exist? Resolved by the row that BEARS ITS NAME,
+    // never by the open-control's own label: a list of N forms renders N
+    // identical "Edit" controls, so matching on the control always returns the
+    // first row and silently builds every form into whichever sits on top.
+    let { observation } = await this.driver.perceive();
+    if (resolveFormOpenCandidates(observation, form.name).length === 0) {
       await this.createForm(form);
+      ({ observation } = await this.driver.perceiveAfterSettle(250));
     }
 
-    // Open the form (click edit/open/modify button).
-    const { observation: afterCreate } = await this.driver.perceive();
-    const editLink = afterCreate.elements.find(
-      (e) => (e.role === 'link' || e.role === 'button') &&
-        (e.name === form.name || e.name.toLowerCase().includes('edit') ||
-         e.name.toLowerCase().includes('modify') || e.name.toLowerCase().includes('open')),
-    );
-    if (editLink) {
-      await this.driver.click(editLink.handle);
+    // Open it, then CONFIRM which form actually opened. Ranking only sets the
+    // trial order; the read-back adjudicates.
+    const candidates = resolveFormOpenCandidates(observation, form.name);
+    let opened = false;
+    for (const cand of candidates.slice(0, 3)) {
+      await this.driver.click(cand.handle);
       await this.sleep(500);
+      const { observation: after } = await this.driver.perceiveAfterSettle(250);
+      if (surfaceShowsForm(after, form.name, siblings)) {
+        opened = true;
+        break;
+      }
+      // Wrong surface. Back out and try the next candidate rather than
+      // building this form's fields into whatever is on screen.
+      const back = rankCandidates(enumerateActions(after), { hint: 'discard' })[0]?.el;
+      if (back) {
+        await this.driver.click(back.handle);
+        await this.sleep(400);
+      }
+    }
+
+    if (!opened) {
+      // Never claim a form is open when the read-back disagrees: that is the
+      // failure that silently writes 195 fields into the wrong document.
+      await this.escalateItem(`form-open:${formId}`, 'acting', {
+        key: `form-open:${formId}`,
+        fieldLabel: '(whole form)',
+        canonicalType: 'text',
+        formName: form.name,
+        visitName: this.irVisitMap.get(visitId)?.name ?? visitId,
+        suspectedTrap:
+          'Every row in a document list tends to render an identically named ' +
+          'open control; the form name lives beside it, not on it.',
+        reason:
+          `Could not confirm the designer for "${form.name}" opened. Tried ` +
+          `${candidates.length} candidate control(s); the surface never showed ` +
+          `this form. Its fields are NOT being built to avoid writing them into ` +
+          `another document.`,
+        evidence: candidates.slice(0, 3).map(
+          (c) => `${c.role} "${c.name}" in group "${c.groupText ?? ''}"`,
+        ),
+        phase: 'acting',
+      }, /* blocking */ true);
+      return;
     }
 
     this.currentFormId = formId;
     await this.discoverFormBuilder();
+
+    // Deep reconcile: what is ACTUALLY in this form right now.
+    //
+    // This is also where the reuse question answers itself. A form that arrives
+    // already populated means the platform shares definitions across visits, so
+    // its fields are adopted; an empty one means it rebuilds per visit, so they
+    // are built. Discovered by looking, never assumed in either direction.
+    if (this.deepReconcileAvailable) {
+      const irForm = this.irFormMap.get(formId);
+      const irVisit = this.irVisitMap.get(visitId);
+      if (irForm && irVisit) {
+        const { observation } = await this.driver.perceiveAfterSettle(250);
+        const present = readObservedFields(observation);
+        const result = reconcileForm(
+          {
+            form_id: irForm.form_id,
+            name: irForm.name,
+            fields: irForm.fields.map((f) => ({
+              visit_id: visitId,
+              form_id: irForm.form_id,
+              field_id: f.field_id,
+              label: f.label,
+              canonical_type: f.canonical_type,
+              required: f.required,
+              coded_pairs: f.options,
+              range_units: f.range,
+            })),
+          },
+          present,
+        );
+        this.formReconcile.set(formId, result);
+
+        if (result.sharedDefinition) {
+          this.journal.note(
+            `${irVisit.name} > ${irForm.name}`,
+            'form arrived already populated: this platform shares form definitions ' +
+            'across visits, so its fields are adopted rather than rebuilt',
+          );
+        }
+        if (result.unexpected.length > 0) {
+          this.journal.note(
+            `${irVisit.name} > ${irForm.name}`,
+            `${result.unexpected.length} control(s) present that the input file does ` +
+            `not mention: ${result.unexpected.map((u) => u.label).join(', ')}. ` +
+            `Reported, not removed -- they may be deliberate work.`,
+          );
+        }
+      }
+    }
   }
 
   private async discoverFormBuilder(): Promise<void> {
@@ -894,17 +1464,11 @@ export class Orchestrator {
   }
 
   private async createForm(form: IrForm): Promise<void> {
-    // Click "new form" / "add source document" / "+ New Record Sheet" button.
+    // The control that creates a source document. Ranked, never gated: every
+    // platform has its own word for it and the previous list was a guess.
     const { observation } = await this.driver.perceive();
-    const newBtn = observation.elements.find(
-      (e) => e.role === 'button' && (
-        e.name.toLowerCase().includes('new') ||
-        e.name.toLowerCase().includes('add') ||
-        e.name.toLowerCase().includes('sheet') ||
-        e.name.toLowerCase().includes('document') ||
-        e.name === '+'
-      ),
-    );
+    const newBtn = rankCandidates(enumerateActionable(observation), { hint: 'form_create' })[0]?.el;
+    this.preDialogObs = observation;
     if (newBtn) {
       await this.driver.click(newBtn.handle);
       await this.sleep(300);
@@ -912,12 +1476,10 @@ export class Orchestrator {
 
     // Fill in the form name.
     const { observation: formObs } = await this.driver.perceive();
-    const nameInputs = formObs.elements.filter(
-      (e) => e.role === 'textbox' && (
-        e.name.toLowerCase().includes('name') || e.name.toLowerCase().includes('document') ||
-        e.name.toLowerCase().includes('sheet')
-      ),
-    );
+    const formTextPool = enumerateByRoles(formObs, ['textbox', 'searchbox']);
+    const nameInputs = rankCandidates(formTextPool, { hint: 'name_input' })
+      .slice(0, 1)
+      .map((r) => r.el);
     if (nameInputs.length > 0) {
       await this.driver.setValue(nameInputs[0].handle, form.name);
     }
@@ -926,7 +1488,7 @@ export class Orchestrator {
     if (form.repeating) {
       const toggles = formObs.elements.filter(
         (e) => (e.role === 'checkbox' || e.role === 'switch') &&
-          e.name.toLowerCase().includes('repeat'),
+          rankCandidates([e], { hint: 'repeating' })[0].signals.some((sg) => sg.name === 'lexical'),
       );
       if (toggles.length > 0 && !toggles[0].state.checked) {
         await this.driver.check(toggles[0].handle, true);
@@ -935,12 +1497,7 @@ export class Orchestrator {
 
     // Click create/save.
     const { observation: saveObs } = await this.driver.perceive();
-    const createBtn = saveObs.elements.find(
-      (e) => e.role === 'button' && (
-        e.name.toLowerCase().includes('create') || e.name.toLowerCase().includes('save') ||
-        e.name.toLowerCase().includes('freeze')
-      ),
-    );
+    const createBtn = this.pickDialogCommit(saveObs);
     if (createBtn) {
       await this.driver.click(createBtn.handle, false);
       await this.sleep(500);
@@ -961,39 +1518,100 @@ export class Orchestrator {
       if (ok) {
         await this.sleep(400);
         const post = await this.driver.perceiveAfterSettle(300);
-        const hasUnsaved = post.observation.elements.some((e) => {
-          const n = e.name.toLowerCase();
-          return n.includes('unsaved') || n.includes('dirty') || n.includes('unfrozen');
-        });
+        // Whether a working-copy indicator is still showing. Word list lives
+        // in ranking.ts; the authoritative signal is analyzeCommit's structural
+        // before/after comparison, which ran above.
+        const hasUnsaved = post.observation.elements.some(
+          (e) => e.name.length > 0 && matchesStatusHint(e.name),
+        );
         if (!hasUnsaved) return;
       }
     }
 
-    // Fallback: search for Save / Freeze / Commit button (avoiding Save As Template / Bank It traps)
-    const saveButtons = observation.elements.filter((e) => {
-      if (e.role !== 'button') return false;
-      const n = e.name.toLowerCase();
-      if (n.includes('template') || n.includes('bank')) return false;
-      return n.includes('save') || n.includes('freeze') || n.includes('commit') || n === 'save';
-    });
+    // Fallback: actually work DOWN the ranked trial order, rather than trying
+    // the top candidate once and giving up. Nothing is excluded by name --
+    // decoys are demoted in the ranking and still probed -- and the decoy is
+    // identified by analyzeCommit observing that the working copy did not
+    // change, not by recognising its label.
+    //
+    // This loop is what the previous single-shot version was supposed to be.
+    // On the supplied mock "Save As Template" and "Save" tie on the word
+    // "save", DOM order put the decoy first, it was clicked once, correctly
+    // reported as not-a-commit, and then the form was abandoned uncommitted
+    // and its entire contents lost on the next navigation.
+    const trials = rankCommitCandidates(observation).map((r) => r.el);
+    const MAX_COMMIT_TRIALS = 6;
+    const attempted: string[] = [];
 
-    if (saveButtons.length > 0) {
-      await this.driver.click(saveButtons[0].handle, false);
+    for (const candidate of trials.slice(0, MAX_COMMIT_TRIALS)) {
+      const before = await this.driver.perceive();
+      const clicked = await this.driver.click(candidate.handle, false);
+      if (!clicked.ok) continue;
+      attempted.push(candidate.name);
+
       await this.sleep(400);
       const post = await this.driver.perceiveAfterSettle(300);
-      const commitCheck = analyzeCommit(observation, post.observation);
+      const commitCheck = analyzeCommit(before.observation, post.observation);
+
       if (commitCheck.committed) {
         this.bindings['ctx.commit'] = {
           op: 'ctx.commit',
           version: 1,
-          recipe: [{ step: 'click', evidence_role: 'button', evidence_name: saveButtons[0].name, handle_kind: 'snapshot-id' }],
+          recipe: [{
+            step: 'click',
+            evidence_role: candidate.role,
+            evidence_name: candidate.name,
+            handle_kind: 'snapshot-id',
+          }],
           post_condition: { description: 'committed' },
-          evidence: commitCheck.evidence,
+          evidence: [
+            ...commitCheck.evidence,
+            `confirmed after trying: ${attempted.join(' -> ')}`,
+          ],
           rung: 1,
           status: 'bound',
+          // Probe-confirmed: this control demonstrably persisted the work.
+          confidence: 'structural',
         };
+        return;
       }
     }
+
+    // Nothing committed. This is the single most expensive silent failure in
+    // the contract -- everything built in this form is about to be discarded
+    // by the next navigation -- so it escalates rather than passing quietly.
+    const formName = this.currentFormId
+      ? this.irFormMap.get(this.currentFormId)?.name ?? this.currentFormId
+      : 'the open form';
+    this.journal.note(
+      this.currentFormId ?? 'commit',
+      `could not commit "${formName}": tried ${attempted.length} candidate(s) ` +
+      `(${attempted.join(', ') || 'none clickable'}) and none cleared the ` +
+      `working copy. Work in this form is unsaved.`,
+    );
+    this.callbacks.onEscalation({
+      key: `commit:${this.currentFormId ?? 'unknown'}`,
+      // How this platform persists a form is ONE decision, not one per form.
+      // Ungrouped, this asked again for every one of the 28 appearances and
+      // turned the build into an interrupt-driven review session.
+      groupKey: 'commit:platform',
+      fieldLabel: formName,
+      formName,
+      visitName: this.currentVisitId
+        ? this.irVisitMap.get(this.currentVisitId)?.name ?? this.currentVisitId
+        : '',
+      canonicalType: 'text',
+      reason:
+        `Could not save "${formName}". Tried ${attempted.length} control(s) and ` +
+        `none of them actually persisted the working copy.`,
+      suspectedTrap:
+        'a control that looks like save may only be filing the form away ' +
+        'under a reusable name; everything built in this form is unsaved and ' +
+        'will be lost on navigation',
+      evidence: attempted.map((n) => `clicked "${n}" -- working copy unchanged`),
+      phase: 'acting',
+      blocking: true,
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -1099,36 +1717,73 @@ export class Orchestrator {
   // Escalation.
   // -------------------------------------------------------------------------
 
+  /**
+   * Escalate an item to the human gate.
+   *
+   * Blocking escalations pause the run because it genuinely cannot proceed
+   * without an answer -- no commit control, or an unresolved canonical type
+   * that every field of that type is stuck behind. Non-blocking ones are
+   * parked and the run continues, so a 195-field build is one review session
+   * at the end rather than an interrupt-driven slog.
+   *
+   * Items sharing a groupKey resolve together: answering "single_select maps
+   * to Beam Pick" once settles all 14 single_select fields.
+   */
   private async escalateItem(
     itemKey: string,
     phase: 'binding' | 'acting' | 'verifying',
-    escalation: EscalationItem,
-  ): Promise<void> {
-    // Mark the item as escalated in the state machine.
+    escalation: Omit<EscalationItem, 'blocking'>,
+    blocking: boolean,
+  ): Promise<HumanDecision | null> {
+    // A decision already given for this group settles this item too.
+    const existing = escalation.groupKey
+      ? this.groupDecisions.get(escalation.groupKey)
+      : undefined;
+    if (existing) return existing;
+
     const record = this.runState.items[itemKey];
     if (record && record.state !== 'escalated') {
       await applyTransition(this.adapter, this.runState, itemKey, 'escalate');
     }
 
-    // Notify the side panel.
-    this.callbacks.onEscalation(escalation);
+    const item: EscalationItem = { ...escalation, blocking };
+    this.callbacks.onEscalation(item);
 
-    // Wait for human decision.
+    const source = this.sourceOfKey(itemKey, escalation);
+
+    if (!blocking) {
+      // Park it. The run continues; the reviewer clears the pile at the end.
+      this.parked.push(item);
+      this.journal.escalated(source, escalation.reason, null);
+      return null;
+    }
+
     const decision = await new Promise<HumanDecision>((resolve) => {
       this.escalationQueue.set(itemKey, { resolve });
     });
 
-    // Apply the decision.
+    this.journal.escalated(source, escalation.reason, {
+      action: decision.action,
+      note: decision.note,
+    });
+
+    if (escalation.groupKey) {
+      this.groupDecisions.set(escalation.groupKey, decision);
+    }
+
+    await this.applyHumanDecision(itemKey, decision);
+    return decision;
+  }
+
+  /** Apply a human decision to one item. */
+  private async applyHumanDecision(itemKey: string, decision: HumanDecision): Promise<void> {
     if (decision.action === 'approve') {
-      // Accept the agent's best guess -- mark as verified.
       await this.markVerified(itemKey);
     } else if (decision.action === 'skip') {
       // Leave as escalated, move on.
     } else if (decision.action === 'override' && decision.overrideType) {
-      // Re-bind with the corrected type and retry.
       const field = this.irFieldMap.get(this.runState.items[itemKey]?.field_id ?? '');
       if (field) {
-        // Override: update the type binding.
         const newBinding = bindFieldAdd(
           (await this.driver.perceive()).observation,
           decision.overrideType,
@@ -1138,18 +1793,125 @@ export class Orchestrator {
         }
       }
     } else if (decision.action === 'retry') {
-      // Will be retried on the next pass.
       this.runState.items[itemKey].state = 'pending';
       this.runState.items[itemKey].rebind_count = 0;
     }
   }
 
-  private async markVerified(itemKey: string): Promise<void> {
+  /** Best-effort provenance for an escalation, which may not have a LinearItem. */
+  private sourceOfKey(itemKey: string, e: Omit<EscalationItem, 'blocking'>): IrSource {
+    const item = this.linearItems.find(
+      (i) => idempotencyKey(i.visit_id, i.form_id, i.field_id) === itemKey,
+    );
+    if (item) return this.sourceOf(item);
+    return {
+      path: itemKey,
+      visit_name: e.visitName,
+      form_name: e.formName,
+      field_label: e.fieldLabel,
+      declared_type: e.canonicalType,
+    };
+  }
+
+  /** Observation taken immediately before a dialog was opened, so the controls
+   *  the dialog brought with it can be identified structurally. */
+  private preDialogObs: Observation | null = null;
+
+  /**
+   * Choose the control that confirms an open dialog.
+   *
+   * Ranking across the whole page is not good enough here. A dialog's confirm
+   * button competes with every piece of persistent page chrome, and when no
+   * lexical hint matches -- a button simply labelled "Create" matches nothing
+   * in the commit vocabulary -- the tie falls to DOM order and the agent
+   * clicks the first nav link on the page, navigating away and losing the
+   * dialog entirely. That is not a hypothetical: it is what happened to
+   * form creation on the supplied mock.
+   *
+   * The structural fix is that a dialog's controls APPEARED when the dialog
+   * opened, and page chrome did not. Diff membership already outweighs any
+   * lexical hint 3:1 in the ranking, so passing it here settles the question
+   * without adding a single word to any list.
+   */
+  private pickDialogCommit(current: Observation): ObservationElement | undefined {
+    // Actions only. A dialog's confirm control is never a checkbox, and
+    // including value-holding controls here let a stray "Repeating log"
+    // tick-box outrank the actual Create button on the supplied mock.
+    const pool = enumerateActions(current);
+    const diffAdded = this.preDialogObs
+      ? diffObservations(this.preDialogObs, current).added
+      : undefined;
+    const ranked = rankCandidates(pool, { hint: 'commit', diffAdded });
+
+    // Among controls the dialog brought with it, prefer one that is not the
+    // dismiss control -- cancel and confirm both appear in the same diff.
+    const appeared = diffAdded
+      ? ranked.filter((r) => diffAdded.includes(r.el.handle))
+      : [];
+    if (appeared.length > 1) {
+      const discardRanked = rankCandidates(appeared.map((r) => r.el), { hint: 'discard' });
+      const dismiss = discardRanked[0];
+      const dismissHasSignal = dismiss?.signals.some((sg) => sg.name === 'lexical');
+      if (dismissHasSignal) {
+        const notDismiss = appeared.find((r) => r.el.handle !== dismiss.el.handle);
+        if (notDismiss) return notDismiss.el;
+      }
+    }
+
+    return (appeared[0] ?? ranked[0])?.el;
+  }
+
+  /** Provenance for a step: which entry in the input file it came from. */
+  private sourceOf(item: LinearItem): IrSource {
+    const visitIndex = this.ir.visits.findIndex((v) => v.visit_id === item.visit_id);
+    const visit = this.ir.visits[visitIndex];
+    const formIndex = visit ? visit.forms.findIndex((f) => f.form_id === item.form_id) : -1;
+    const form = formIndex >= 0 ? visit.forms[formIndex] : undefined;
+    const fieldIndex = form ? form.fields.findIndex((f) => f.field_id === item.field_id) : -1;
+    return {
+      path: `visits[${visitIndex}].forms[${formIndex}].fields[${fieldIndex}]`,
+      visit_name: item.visit_name,
+      form_name: item.form_name,
+      field_label: item.label,
+      declared_type: item.canonical_type,
+    };
+  }
+
+  /** The provenance journal, for export from the side panel. */
+  getJournal(): Journal {
+    return this.journal;
+  }
+
+  /** Non-blocking escalations awaiting end-of-run review. */
+  getParked(): EscalationItem[] {
+    return this.parked.slice();
+  }
+
+  /** Shallow-pass survey, for the pre-flight screen. */
+  getTreeSummary(): TreeSummary | null {
+    return this.treeSummary;
+  }
+
+  private async markVerified(itemKey: string, evidence?: {
+    rung: BindingRung; evidence: string[]; reason: string;
+  }): Promise<void> {
     const record = this.runState.items[itemKey];
     if (record) {
       record.state = 'verified';
       record.last_verdict = 'VERIFIED';
       await saveRunState(this.adapter, this.runState);
+    }
+
+    const item = this.linearItems.find(
+      (i) => idempotencyKey(i.visit_id, i.form_id, i.field_id) === itemKey,
+    );
+    if (item) {
+      this.journal.created(
+        this.sourceOf(item),
+        item.op,
+        { rung: evidence?.rung ?? 0, evidence: evidence?.evidence ?? [item.description] },
+        { verdict: 'VERIFIED', reason: evidence?.reason ?? `${item.description} confirmed by read-back` },
+      );
     }
   }
 
@@ -1233,6 +1995,10 @@ export class Orchestrator {
             visitName: visit?.name ?? record.visit_id,
             canonicalType: (field?.canonical_type ?? 'text') as CanonicalType,
             reason: record.escalation_reason ?? 'unknown',
+            // Reconstructed from persisted state, which does not record the
+            // flag. Reported as non-blocking: the run reached its summary, so
+            // nothing was still holding it up.
+            blocking: false,
             evidence: [],
             phase: 'verifying',
           });

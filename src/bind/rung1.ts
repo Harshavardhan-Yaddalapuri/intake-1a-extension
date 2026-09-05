@@ -28,6 +28,7 @@ import type {
   ContractOpId,
 } from '../shared/contract';
 import type { Observation, ObservationElement, Diff } from '../perceive/core';
+import { LEXICAL_HINTS, type HintKey } from './ranking';
 import { diffObservations } from '../perceive/core';
 import type { ActContext } from '../act/primitives';
 import { click, setValue, resolveHandle } from '../act/primitives';
@@ -117,6 +118,30 @@ export function detectDisposability(
 // ---------------------------------------------------------------------------
 
 /**
+ * Does this name contain any word from a hint list?
+ *
+ * A weak, supplementary signal. It may add evidence toward a classification;
+ * it may never exclude an element from consideration. The word lists live in
+ * ranking.ts, the single declared home for lexical hints, so that this file
+ * carries no vocabulary of its own.
+ */
+function matchesHint(name: string, hint: HintKey): boolean {
+  const n = name.toLowerCase();
+  return LEXICAL_HINTS[hint].some((w) => n.includes(w));
+}
+
+/** Does any of these elements carry a name suggesting this hint?
+ *
+ *  Scoped to a caller-supplied list, never a whole observation. Scanning the
+ *  entire page would let an unrelated control poison the answer -- a palette
+ *  tile named "Multi Choice Box" would make the agent believe an options
+ *  editor had appeared, which is precisely the name-over-structure mistake
+ *  the probe exists to correct. */
+function namesSuggestIn(elements: readonly ObservationElement[], hint: HintKey): boolean {
+  return elements.some((e) => matchesHint(e.name, hint));
+}
+
+/**
  * Place a control on the scratch form, inspect its role, option structure,
  * and mutual exclusivity from the DIFF, then discard.
  *
@@ -133,56 +158,56 @@ export function inspectPlacedControl(
   const addedHandles = new Set(diff.added);
   const addedElements = afterObs.elements.filter((e) => addedHandles.has(e.handle));
 
-  // 1. Detect structural affordances in options panel
-  const hasOptionsEditor = afterObs.elements.some((e) => {
-    const n = e.name.toLowerCase();
-    return n.includes('add value') || n.includes('paste values') || n.includes('values');
-  });
+  // 1. Separate the placed control from the property editor that opened
+  //    alongside it.
+  //
+  //    This has to happen FIRST, because the property panel is full of
+  //    controls that look like field affordances but are not: env-rosetta's
+  //    panel contains an "Element Type" combobox carrying 13 options, and
+  //    reading those as "this field has an option list" misclassifies a plain
+  //    tick box as a multi-select. Affordances are therefore judged relative
+  //    to the placed control, never to everything that appeared.
+  const isPropertyEditorControl = (el: ObservationElement) =>
+    matchesHint(el.name, 'property_editor');
 
-  const hasRangeEditor = afterObs.elements.some((e) => {
-    const n = e.name.toLowerCase();
-    return n.includes('minimum') || n.includes('maximum') || n.includes('range');
-  });
+  const canvasControls = addedElements.filter((e) => !isPropertyEditorControl(e));
+  const panelControls = addedElements.filter((e) => isPropertyEditorControl(e));
 
-  const hasDecimalPlaces = afterObs.elements.some((e) => {
-    const n = e.name.toLowerCase();
-    return n.includes('decimal places');
-  });
+  const DATA_ROLES = [
+    'checkbox', 'radio', 'combobox', 'listbox', 'radiogroup',
+    'spinbutton', 'textbox', 'switch', 'slider',
+  ];
+  const placedCandidate =
+    canvasControls.find((e) => DATA_ROLES.includes(e.role)) ??
+    canvasControls[0];
 
-  const hasFormulaEditor = afterObs.elements.some((e) => {
-    const n = e.name.toLowerCase();
-    return n.includes('formula');
-  });
+  // 2. Detect affordances.
+  //
+  //    Structure leads, vocabulary only corroborates, and both are scoped so
+  //    an unrelated control cannot poison the answer.
+  const hasOptionsEditor =
+    // The placed control itself carries a choice vocabulary. A tick box does
+    // not; a list-of-choices control does.
+    (placedCandidate?.options.length ?? 0) > 0 ||
+    // Or the property panel offers a coded-value editor -- checked against the
+    // PANEL only, so the field's own label ("Multi Choice Box") cannot vote.
+    namesSuggestIn(panelControls, 'coded_values');
 
-  const hasDatePickerOptions = afterObs.elements.some((e) => {
-    const n = e.name.toLowerCase();
-    return n.includes('allow past') || n.includes('allow future') || n.includes('picker options');
-  });
+  const hasRangeEditor =
+    (placedCandidate?.state.range !== undefined) ||
+    panelControls.filter((e) => e.role === 'spinbutton').length >= 2 ||
+    namesSuggestIn(panelControls, 'range');
 
-  // 2. Filter out options-panel controls to isolate the canvas control
-  const isOptionsPanelControl = (el: ObservationElement) => {
-    const n = el.name.toLowerCase();
-    return (
-      n === 'label' ||
-      n === 'element type' ||
-      n === 'visibility' ||
-      n === 'delete element' ||
-      n.includes('add value') ||
-      n.includes('paste values') ||
-      n.includes('apply pasted') ||
-      n === 'required' ||
-      n === 'hidden' ||
-      n.includes('minimum') ||
-      n.includes('maximum') ||
-      n.includes('units') ||
-      n.includes('decimal places') ||
-      n.includes('formula') ||
-      n.includes('allow past') ||
-      n.includes('allow future')
-    );
-  };
+  const hasDecimalPlaces =
+    // A fractional step is the structural statement that this control holds
+    // non-integers; the label is only a fallback.
+    (placedCandidate?.state.range?.step !== undefined &&
+      !Number.isInteger(placedCandidate.state.range.step)) ||
+    namesSuggestIn(panelControls, 'decimals');
 
-  const canvasControls = addedElements.filter((e) => !isOptionsPanelControl(e));
+  const hasFormulaEditor = namesSuggestIn(panelControls, 'formula');
+  const hasDatePickerOptions = namesSuggestIn(panelControls, 'date_options');
+
 
   // Find placed control from canvas controls, or fallback to addedElements
   let placedControl = canvasControls.find(
@@ -422,34 +447,61 @@ export function analyzeCommit(
 ): CommitProbeResult {
   const diff = diffObservations(beforeObs, afterObs);
 
-  // Indicators that commit persisted changes:
-  // 1. A persistence indicator appeared (and is NOT a template/banked indicator)
-  const isPersistName = (name: string) => {
-    const n = name.toLowerCase();
-    if (n.includes('template') || n.includes('banked') || n.includes('bank it')) return false;
-    return n.includes('saved') || n.includes('frozen') || n.includes('freeze') || n.includes('active') || n.includes('committed');
-  };
+  // What distinguishes a real save from a decoy that looks like one?
+  //
+  // Not the button's name. "Save As Template", "Bank It", "Export" all read
+  // like persistence and none of them persist the working copy. The structural
+  // answer is that a real commit CLEARS the working-copy state: whatever
+  // indicator the platform was showing to mean "you have unsaved work"
+  // disappears. A decoy leaves it exactly where it was.
+  //
+  // So the probe compares status-bearing text before and after and looks for
+  // an indicator that went away. That works whether the platform calls the
+  // state "Unsaved", "Draft", "Modified", "Unfrozen", or something nobody has
+  // thought of, because it never reads the word -- only its disappearance.
+  const STATUS_ROLES = ['status', 'alert', 'note', 'banner', 'contentinfo', 'generic', 'paragraph'];
+  const statusText = (obs: Observation) =>
+    obs.elements
+      .filter((e) => STATUS_ROLES.includes(e.role) && e.name.length > 0)
+      .map((e) => e.name);
 
-  const addedIndicators = afterObs.elements.filter(
-    (e) => isPersistName(e.name) && (diff.added.includes(e.handle) || e.role === 'status'),
+  const before = statusText(beforeObs);
+  const after = new Set(statusText(afterObs));
+  const clearedIndicators = before.filter((name) => !after.has(name));
+
+  // Second structural signal: a live region appeared. An ARIA status/alert
+  // region is how a platform announces the outcome of an action, and its mere
+  // APPEARANCE is structural -- no vocabulary needed to notice it.
+  //
+  // Vocabulary enters at exactly one point, and only to reject a decoy: a
+  // control that files the work away under a reusable name announces that it
+  // did so ("Banked as a reusable template", "Saved to library"), whereas a
+  // real commit does not. That word list lives in ranking.ts. Note the
+  // deliberate omission of any positive word list here: requiring the
+  // announcement to MATCH a persisted-state vocabulary would fail on any
+  // platform whose word for "saved" we did not guess, which is the whole
+  // failure this refactor exists to remove.
+  const announcements = afterObs.elements.filter(
+    (e) =>
+      diff.added.includes(e.handle) &&
+      (e.role === 'status' || e.role === 'alert') &&
+      e.name.length > 0,
   );
+  const addedIndicators = announcements.filter((e) => !matchesHint(e.name, 'template'));
+  const decoyAnnouncements = announcements.filter((e) => matchesHint(e.name, 'template'));
 
-  // 2. An unsaved/dirty indicator was present before and is NOT present after
-  const isUnsaved = (name: string) => {
-    const n = name.toLowerCase();
-    return n.includes('unsaved') || n.includes('dirty') || n.includes('unfrozen');
-  };
+  const committed = clearedIndicators.length > 0 || addedIndicators.length > 0;
 
-  const hadUnsavedBefore = beforeObs.elements.some((e) => isUnsaved(e.name));
-  const hasUnsavedAfter = afterObs.elements.some((e) => isUnsaved(e.name));
-  const unsavedCleared = hadUnsavedBefore && !hasUnsavedAfter;
-
-  if (addedIndicators.length > 0 || unsavedCleared) {
+  if (committed) {
     return {
       committed: true,
       evidence: [
-        ...(addedIndicators.length > 0 ? [`persistence indicator appeared: ${addedIndicators.map((i) => i.name).join(', ')}`] : []),
-        ...(unsavedCleared ? ['unsaved/dirty indicator was cleared'] : []),
+        ...(clearedIndicators.length > 0
+          ? [`working-copy indicator cleared: ${clearedIndicators.join(', ')}`]
+          : []),
+        ...(addedIndicators.length > 0
+          ? [`persisted-state indicator appeared: ${addedIndicators.map((i) => i.name).join(', ')}`]
+          : []),
         'commit probe: persisted',
       ],
     };
@@ -458,9 +510,16 @@ export function analyzeCommit(
   return {
     committed: false,
     evidence: [
-      `no persistence indicator detected after commit click`,
+      'no working-copy indicator was cleared and no persisted-state indicator appeared',
       `diff: ${diff.added.length} added, ${diff.removed.length} removed, ${diff.changed.length} changed`,
-      'commit probe: NOT persisted (may need a different commit button)',
+      ...(decoyAnnouncements.length > 0
+        ? [
+            `control announced "${decoyAnnouncements.map((d) => d.name).join(', ')}" -- ` +
+            `it files the work away under a reusable name rather than committing ` +
+            `this form; not every control that looks like save actually saves`,
+          ]
+        : []),
+      'commit probe: NOT persisted (this control is not the one that commits)',
     ],
   };
 }
@@ -544,6 +603,9 @@ export function makeTypeBinding(
     ],
     rung: 1,
     status: classification.matches ? 'bound' : 'needs-human',
+    // The probe placed the control and read back what appeared, so this is a
+    // conclusion when it agrees -- and an explicit non-answer when it does not.
+    confidence: classification.matches ? 'structural' : 'tentative',
   };
 }
 

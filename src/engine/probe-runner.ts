@@ -16,12 +16,12 @@
  *   - NEVER uses mock debug hooks (__readState, __groundTruth).
  */
 
+import { CANONICAL_TYPES } from '../shared/contract';
 import type {
   BindingRecord,
   CanonicalType,
   ContractOpId,
 } from '../shared/contract';
-import { CANONICAL_TYPES } from '../shared/contract';
 import type { Observation } from '../perceive/core';
 import { diffObservations } from '../perceive/core';
 import {
@@ -34,6 +34,8 @@ import {
   type CommitProbeResult,
 } from '../bind/rung1';
 import { TabDriver } from './tab-driver';
+import { enumerateActionable, enumerateActions, rankCandidates, largestControlCluster } from '../bind/ranking';
+import { rankCommitCandidates } from '../bind/rung0';
 
 export interface DiscoveredPaletteItem {
   name: string;
@@ -60,20 +62,35 @@ export class ProbeRunner {
     const bindings: Partial<Record<CanonicalType, BindingRecord>> = {};
     const discovered: DiscoveredPaletteItem[] = [];
 
-    // Find candidate palette buttons.
-    // In any eSource platform, palette items are buttons or clickable elements
-    // in a sidebar, toolbar, modal, or strip.
-    const candidateButtons = currentObs.elements.filter((e) => {
-      if (e.role !== 'button') return false;
-      const lower = e.name.toLowerCase();
-      // Exclude obvious navigation/header buttons
-      if (lower.includes('back') || lower.includes('home') || lower.includes('close') ||
-          lower.includes('preview') || lower.includes('save') || lower.includes('freeze') ||
-          lower.includes('commit') || lower.includes('cancel') || lower.includes('delete')) {
-        return false;
-      }
-      return true;
+    // Every actionable control is a palette candidate.
+    //
+    // Placing one and reading back what appeared is the only reliable way to
+    // tell a palette tile from a toolbar button on an unseen platform: a tile
+    // adds a control to the canvas, a toolbar button does not. Excluding
+    // candidates by name here would silently skip whichever tile this platform
+    // names unusually -- and the loop below already handles a non-tile
+    // gracefully, since inspectPlacedControl reports observedRole 'none' and
+    // the iteration moves on. That is the adjudication; a name filter would
+    // pre-empt it.
+    // Probing is DESTRUCTIVE: clicking a control to see whether it places a
+    // field will, if that control is a nav link, navigate away from the
+    // designer and break every probe after it. So the trial order puts the
+    // palette region first, found structurally as the tightest container
+    // holding the most controls, and the sweep is capped.
+    const allActionable = enumerateActionable(currentObs);
+    const cluster = largestControlCluster(allActionable);
+    const ranked = rankCandidates(allActionable, {
+      hint: 'palette',
+      regionHandle: cluster?.regionHandle,
     });
+    const inRegion = cluster
+      ? ranked.filter((r) => cluster.members.some((m) => m.handle === r.el.handle))
+      : [];
+    const rest = ranked.filter((r) => !inRegion.includes(r));
+    const MAX_PALETTE_TRIALS = 40;
+    const candidateButtons = [...inRegion, ...rest]
+      .slice(0, MAX_PALETTE_TRIALS)
+      .map((r) => r.el);
 
     for (const btn of candidateButtons) {
       try {
@@ -90,8 +107,14 @@ export class ProbeRunner {
         // 3. Snapshot after click
         const after = await this.driver.perceiveAfterSettle(200);
 
-        // 4. Inspect the placed control from the diff
-        const probe = inspectPlacedControl(before.observation, after.observation);
+        // 4. Inspect the placed control from the diff. A choice control that
+        //    arrived empty is roleless, so give it values and look again.
+        let observed = after.observation;
+        let probe = inspectPlacedControl(before.observation, observed);
+        if (probe.hasOptionsEditor && (probe.observedRole === 'generic' || probe.observedRole === 'none')) {
+          observed = await this.deepenChoiceProbe(before.observation, observed);
+          probe = inspectPlacedControl(before.observation, observed);
+        }
         if (probe.observedRole === 'none') {
           // Nothing appeared on canvas -- not an element creator
           continue;
@@ -130,22 +153,108 @@ export class ProbeRunner {
   }
 
   /**
+   * Give a placed choice control some values so it can reveal what it is.
+   *
+   * An EMPTY choice control is roleless: a radio group with no options and a
+   * dropdown with no options both render as a bare container, so the probe
+   * reads role 'generic' and can classify neither. Adding two values makes the
+   * platform render the real control and the role appears -- verified on the
+   * supplied mock, where "Radio Buttons" reads as 'generic' when empty and as
+   * 'radio' once it has options.
+   *
+   * The add-value control is found among the actions the PROPERTY PANEL
+   * brought with it, never across the whole page: ranking page-wide picks a
+   * palette tile called "Check List" over the panel's "+ Add Value", because
+   * both match the coded-value hint and the tile happens to come first.
+   */
+  private async deepenChoiceProbe(
+    beforePlace: Observation,
+    afterPlace: Observation,
+  ): Promise<Observation> {
+    const appeared = new Set(diffObservations(beforePlace, afterPlace).added);
+    const panelActions = enumerateActions(afterPlace).filter((e) => appeared.has(e.handle));
+    if (panelActions.length === 0) return afterPlace;
+
+    const addValue = rankCandidates(panelActions, { hint: 'coded_values' })[0]?.el;
+    if (!addValue) return afterPlace;
+
+    let current = afterPlace;
+    for (let i = 0; i < 2; i += 1) {
+      const before = current;
+      const target = current.elements.find((e) => e.handle === addValue.handle) ? addValue.handle : null;
+      if (!target) break;
+      const res = await this.driver.click(target);
+      if (!res.ok) break;
+      await this.sleep(200);
+      current = (await this.driver.perceiveAfterSettle(150)).observation;
+      // If the click added nothing, it was not the add-value control; stop
+      // rather than clicking it repeatedly.
+      if (diffObservations(before, current).added.length === 0) break;
+    }
+    return current;
+  }
+
+  /**
+   * Place ONE specific candidate and read back what appeared.
+   *
+   * This is the adjudication step for rung 2: the model names a candidate,
+   * this places it, and the observed role decides whether the model was right.
+   * Shares its logic with probePalette's sweep so the two cannot drift.
+   */
+  async placeAndInspect(handle: string): Promise<{
+    probe: ProbeResult;
+    matchedTypes: CanonicalType[];
+  }> {
+    const before = await this.driver.perceive();
+    const clickRes = await this.driver.click(handle);
+    if (!clickRes.ok) {
+      return {
+        probe: inspectPlacedControl(before.observation, before.observation),
+        matchedTypes: [],
+      };
+    }
+    await this.sleep(250);
+    const after = await this.driver.perceiveAfterSettle(200);
+
+    let observed = after.observation;
+    let probe = inspectPlacedControl(before.observation, observed);
+    if (probe.hasOptionsEditor && (probe.observedRole === 'generic' || probe.observedRole === 'none')) {
+      observed = await this.deepenChoiceProbe(before.observation, observed);
+      probe = inspectPlacedControl(before.observation, observed);
+    }
+    if (probe.observedRole === 'none') return { probe, matchedTypes: [] };
+
+    const matchedTypes = CANONICAL_TYPES.filter(
+      (t) => classifyTypeFromProbe(t, probe).matches,
+    );
+    return { probe, matchedTypes };
+  }
+
+  /**
    * Probe candidate save/persist buttons to verify which one actually commits the draft.
    */
   async probeCommitButton(currentObs: Observation): Promise<{
     commitBinding: BindingRecord | null;
     evidence: string[];
   }> {
-    const candidates = currentObs.elements.filter((e) => {
-      if (e.role !== 'button') return false;
-      const n = e.name.toLowerCase();
-      return n.includes('save') || n.includes('freeze') || n.includes('commit') ||
-             n.includes('persist') || n.includes('bank');
-    });
+    // Trial order comes from ranking, not filtering. On a platform whose commit
+    // control is named something nobody guessed, the ranking is near-flat and
+    // the probe simply tries more candidates -- slower and correct, rather than
+    // instant and wrong. The previous filter here required the name to contain
+    // save/freeze/commit/persist/bank; 'freeze' and 'bank' were env-rosetta's
+    // own invented words, added so that fixture would pass.
+    const candidates = rankCommitCandidates(currentObs).map((r) => r.el);
+
+    // A commit probe MUTATES state -- it clicks things, and a click can
+    // navigate away. Cap the trials so a pathological page cannot cause an
+    // unbounded click storm, and report honestly when the cap is reached
+    // rather than claiming nothing could commit.
+    const MAX_COMMIT_TRIALS = 12;
+    const trials = candidates.slice(0, MAX_COMMIT_TRIALS);
 
     const evidence: string[] = [];
 
-    for (const btn of candidates) {
+    for (const btn of trials) {
       try {
         const before = await this.driver.perceive();
         const res = await this.driver.click(btn.handle, false);
@@ -173,12 +282,21 @@ export class ProbeRunner {
             ],
             rung: 1,
             status: 'bound',
+            // Probe-confirmed: this control demonstrably persisted the work.
+            confidence: 'structural',
           };
           return { commitBinding: binding, evidence };
         }
       } catch (err) {
         evidence.push(`Error probing "${btn.name}": ${String(err)}`);
       }
+    }
+
+    if (candidates.length > trials.length) {
+      evidence.push(
+        `probed ${trials.length} of ${candidates.length} candidates (capped at ` +
+        `${MAX_COMMIT_TRIALS}); no commit confirmed among them`,
+      );
     }
 
     return { commitBinding: null, evidence };

@@ -14,6 +14,7 @@ import type { CanonicalType, CapabilityReport, BindingRecord, ContractOpId } fro
 import type { Observation, Diff } from '../perceive/core';
 import type { ActResult } from '../act/primitives';
 import type { Plan, LinearItem } from '../plan/compiler';
+import type { TreeSummary } from '../engine/reconcile';
 import type { Verdict, VerdictResult } from '../verify/verify';
 import type { ItemState, RunState } from '../engine/state-machine';
 
@@ -176,6 +177,47 @@ export interface EscalationItem {
   binding?: BindingRecord;
   /** What phase the escalation happened in. */
   phase: 'binding' | 'acting' | 'verifying';
+  /** Blocking escalations pause the run because it cannot proceed without an
+   *  answer (no commit control; an unresolved canonical type gating every
+   *  field of that type). Non-blocking ones are parked and reviewed at the
+   *  end, so a long build is not an interrupt-driven review session. */
+  blocking: boolean;
+  /** Stable key grouping items that share ONE decision, e.g. the canonical
+   *  type. Answering once settles every item in the group. */
+  groupKey?: string;
+  /** How many other items share this decision. A type mapping affecting 14
+   *  fields is one decision, not fourteen. */
+  blastRadius?: { fields: number; forms: number };
+}
+
+/** Shallow-pass reconcile result, shown on the pre-flight screen so the human
+ *  authorises the run from a concrete statement of the work rather than an
+ *  empty progress bar. */
+export interface ReconcileSummaryMsg {
+  type: 'RECONCILE_SUMMARY';
+  summary: TreeSummary;
+  /** When false, field-level reconciliation is unavailable on this platform
+   *  and a re-run cannot tell an already-built field from a missing one. */
+  deepReconcileAvailable: boolean;
+}
+
+/** The parked (non-blocking) escalations, delivered at the end of the run to
+ *  be cleared in one review session. */
+export interface ParkedReviewMsg {
+  type: 'PARKED_REVIEW';
+  items: EscalationItem[];
+}
+
+/** Side panel -> background: fetch the provenance journal for export. */
+export interface GetJournalMsg {
+  type: 'GET_JOURNAL';
+}
+
+export interface JournalExport {
+  runId: string;
+  jsonl: string;
+  html: string;
+  recordCount: number;
 }
 
 /** The run is complete. */
@@ -214,6 +256,7 @@ export type ContentScriptMsg = PerceiveObserveMsg | ActExecuteMsg;
 
 /** All messages the side panel can send to the service worker. */
 export type SidePanelToBackgroundMsg =
+  | GetJournalMsg
   | StartRunMsg
   | PauseRunMsg
   | ResumeRunMsg
@@ -223,6 +266,8 @@ export type SidePanelToBackgroundMsg =
 
 /** All messages the service worker can broadcast to the side panel. */
 export type BackgroundToSidePanelMsg =
+  | ReconcileSummaryMsg
+  | ParkedReviewMsg
   | PreflightReportMsg
   | RunProgressMsg
   | EscalationMsg
