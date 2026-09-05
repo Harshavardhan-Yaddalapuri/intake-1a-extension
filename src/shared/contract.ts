@@ -307,7 +307,21 @@ export interface BindingRecord {
   evidence: string[];
   rung: BindingRung;
   status: BindingStatus;
+  /** How well grounded this binding is.
+   *
+   *  `structural`  role AND name agree, or a probe confirmed it — a conclusion.
+   *  `hypothesis`  a name matched and nothing contradicted it — a guess.
+   *  `tentative`   nothing separates the top candidates — barely a guess.
+   *
+   *  Callers MUST treat anything below `structural` as unconfirmed and send it
+   *  to the probe before acting on it. This was previously computed and then
+   *  thrown away, which made a guessed control indistinguishable from a
+   *  verified one and left the whole binding ladder unable to escalate on
+   *  uncertainty — only on absence. */
+  confidence: BindingConfidence;
 }
+
+export type BindingConfidence = 'structural' | 'hypothesis' | 'tentative';
 
 /** A capability report: which ops bound, at which rung, which escalated. */
 export interface CapabilityReport {

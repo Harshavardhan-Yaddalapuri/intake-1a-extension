@@ -368,7 +368,10 @@ test('BIND rung0: bindFieldAdd for single_select finds hypothesis button', async
   const binding = bindFieldAdd(obs, 'single_select');
   assert.ok(binding, 'should find a candidate for single_select');
   assert.equal(binding.op, 'field.add');
-  assert.ok(binding.evidence.some((e) => e.includes('hypothesis')), 'name-only match should be hypothesis');
+  // Was asserted by substring-matching the evidence prose, because the grade
+  // had nowhere else to live: makeBinding computed it and then dropped it on
+  // the floor. It is a typed field now, so assert the field.
+  assert.equal(binding.confidence, 'hypothesis', 'name-only match should be a hypothesis');
 });
 
 test('BIND rung0: bindFieldAdd for radio finds different button than single_select', async () => {

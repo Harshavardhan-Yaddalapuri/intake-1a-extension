@@ -603,6 +603,9 @@ export function makeTypeBinding(
     ],
     rung: 1,
     status: classification.matches ? 'bound' : 'needs-human',
+    // The probe placed the control and read back what appeared, so this is a
+    // conclusion when it agrees -- and an explicit non-answer when it does not.
+    confidence: classification.matches ? 'structural' : 'tentative',
   };
 }
 

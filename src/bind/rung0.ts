@@ -578,28 +578,56 @@ export function bindFieldAdd(obs: Observation, canonicalType: CanonicalType): Bi
   // is flagged for confirmation by the rung 1 place-and-inspect probe.
   //
   // We look for buttons whose name suggests the canonical type.
-  const candidates: Candidate[] = [];
   const typeLower = canonicalType.replace(/_/g, ' ');
+
+  // Score, never take-the-first. The palette on the supplied mock is
+  // alphabetical, so "Multi-line Textbox" precedes "Single Line Textbox",
+  // "Number (Decimal)" precedes "Number (Whole)", and "Date/Time" precedes
+  // "Time". Taking candidates[0] handed all three types the decoy while the
+  // right control sat unused in the same palette.
+  const scored: Array<{ el: ObservationElement; score: number; why: string }> = [];
 
   for (const el of obs.elements) {
     if (el.role !== 'button') continue;
     const name = el.name.toLowerCase();
-    // Loose name matching: the button name might contain the type or a
-    // synonym. This is a HYPOTHESIS, not a conclusion.
-    if (name.includes(typeLower) || matchesSynonym(canonicalType, name)) {
-      candidates.push({
-        el,
-        confidence: 'hypothesis',
-        evidence: `role=button, name~="${el.name}" (name match for ${canonicalType}, hypothesis)`,
-      });
+
+    const own = synonymHits(canonicalType, name) + (name.includes(typeLower) ? 1 : 0);
+    if (own === 0) continue;
+
+    // A control that answers some OTHER canonical type more distinctively is
+    // that type's control, not ours. Subtracting rather than excluding keeps
+    // it in the pool: if this reasoning is wrong on an unseen platform, it is
+    // still reachable, just last.
+    let rival = 0;
+    let rivalOf = '';
+    for (const other of Object.keys(SYNONYMS) as CanonicalType[]) {
+      if (other === canonicalType) continue;
+      const hits = synonymHits(other, name);
+      if (hits > rival) { rival = hits; rivalOf = other; }
     }
+
+    // An exact name match is the strongest name-evidence there is.
+    const exact = name.trim() === typeLower ? 1 : 0;
+
+    scored.push({
+      el,
+      score: own - rival + exact,
+      why: `name~="${el.name}" (${own} match${own === 1 ? '' : 'es'} for ${canonicalType}` +
+        (rival > 0 ? `, ${rival} for ${rivalOf}` : '') + ')',
+    });
   }
 
-  if (candidates.length === 0) return null;
+  if (scored.length === 0) return null;
 
-  // If multiple candidates, pick the first. The rung 1 probe will confirm
-  // by inspecting the actual placed control.
-  const best = candidates[0];
+  scored.sort((a, b) => b.score - a.score);
+  const best = scored[0];
+  const runnerUp = scored[1];
+
+  // Nothing in the names separates the top two: say so, so the probe decides
+  // instead of a coin toss being reported as a finding.
+  const confidence: Candidate['confidence'] =
+    runnerUp && runnerUp.score === best.score ? 'tentative' : 'hypothesis';
+
   const expectedRoles = expectedRolesForType(canonicalType);
 
   return makeBinding(
@@ -607,31 +635,47 @@ export function bindFieldAdd(obs: Observation, canonicalType: CanonicalType): Bi
     0,
     [{ step: 'click', evidence_role: 'button', evidence_name: best.el.name, handle_kind: 'snapshot-id' }],
     `a new control of role [${expectedRoles.join('|')}] appears on canvas`,
-    [best.evidence, `expected roles: ${expectedRoles.join(', ')}`],
-    'hypothesis',
+    [
+      `role=button, ${best.why}`,
+      ...(runnerUp ? [`next best: "${runnerUp.el.name}" (score ${runnerUp.score} vs ${best.score})`] : []),
+      `expected roles: ${expectedRoles.join(', ')}`,
+    ],
+    confidence,
   );
 }
 
 /** Loose synonym matching for canonical types. Used ONLY to generate
  *  hypotheses, never conclusions. */
+const SYNONYMS: Record<CanonicalType, readonly string[]> = {
+  // 'single line' is the positive counterpart to textarea's 'multi-line'.
+  // Without it the two tie on a palette offering both, because every word that
+  // matches one matches the other. Two words, not the bare 'single', which
+  // belongs to single_select.
+  text: ['text', 'textbox', 'line', 'single line', 'single-line', 'short'],
+  textarea: ['textarea', 'multi-line', 'multiline', 'multi line', 'paragraph', 'long'],
+  integer: ['integer', 'whole', 'number'],
+  decimal: ['decimal', 'float', 'number'],
+  date: ['date'],
+  time: ['time'],
+  datetime: ['datetime', 'date/time', 'timestamp'],
+  boolean: ['boolean', 'toggle', 'yes/no', 'yesno', 'switch'],
+  single_select: ['dropdown', 'select', 'single', 'picklist', 'combo'],
+  multi_select: ['multi', 'check list', 'checklist', 'multiselect'],
+  radio: ['radio'],
+  checkbox: ['checkbox', 'check box', 'tick'],
+  calculated: ['calculated', 'formula', 'computed'],
+};
+
+/** How many of this type's synonyms the name contains. A count rather than a
+ *  boolean: "Single Line Textbox" answers `text` on three words where
+ *  "Multi-line Textbox" also answers `textarea`, and that difference is what
+ *  separates a control from its decoy. */
+function synonymHits(canonical: CanonicalType, name: string): number {
+  return (SYNONYMS[canonical] ?? []).filter((s) => name.includes(s)).length;
+}
+
 function matchesSynonym(canonical: CanonicalType, name: string): boolean {
-  const synonyms: Record<CanonicalType, string[]> = {
-    text: ['text', 'textbox', 'line'],
-    textarea: ['textarea', 'multi-line', 'multiline', 'paragraph'],
-    integer: ['integer', 'whole', 'number'],
-    decimal: ['decimal', 'float', 'number'],
-    date: ['date'],
-    time: ['time'],
-    datetime: ['datetime', 'date/time', 'timestamp'],
-    boolean: ['boolean', 'toggle', 'yes/no', 'yesno', 'switch'],
-    single_select: ['dropdown', 'select', 'single', 'picklist', 'combo'],
-    multi_select: ['multi', 'check list', 'checklist', 'multiselect'],
-    radio: ['radio'],
-    checkbox: ['checkbox', 'check box', 'tick'],
-    calculated: ['calculated', 'formula', 'computed'],
-  };
-  const syns = synonyms[canonical] ?? [];
-  return syns.some((s) => name.includes(s));
+  return synonymHits(canonical, name) > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1019,7 +1063,11 @@ function makeBinding(
     },
     evidence,
     rung,
-    status: confidence === 'hypothesis' ? 'bound' : 'bound', // hypotheses are still "bound" but flagged in evidence
+    // A binding that is merely a name guess is still "bound" -- there IS a
+    // candidate to try. What matters is that the grade survives, so a caller
+    // can send an unconfirmed one to the probe instead of acting on it.
+    status: 'bound',
+    confidence,
   };
 }
 

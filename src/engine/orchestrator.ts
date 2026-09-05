@@ -85,7 +85,7 @@ import {
 } from '../bind/rung0';
 import { Journal, type IrSource } from './journal';
 import { rankWithLlm } from '../bind/rung2';
-import { makeTypeBinding } from '../bind/rung1';
+import { makeTypeBinding, inspectPlacedControl, classifyTypeFromProbe } from '../bind/rung1';
 import {
   reconcileForm,
   summariseTree,
@@ -864,6 +864,72 @@ export class Orchestrator {
     const diff = diffObservations(preObs, postObs);
     const elementAdded = diff.added.length > 0 || postObs.elements.length > preObs.elements.length;
 
+    // Adjudicate the type mapping against what ACTUALLY appeared.
+    //
+    // A rung 0 binding is a name guess: the ladder used to escalate only when
+    // no binding existed at all, so a confidently wrong guess was never
+    // challenged and every field of that type was built on it. Placing the
+    // control is itself the probe -- it has already happened here, so this
+    // costs nothing extra and needs no scratch control.
+    //
+    // Runs once per canonical type: a confirmed mapping is upgraded to
+    // `structural` and cached, so the cost is bounded by 13, not by 195.
+    if (elementAdded && typeBinding.confidence !== 'structural') {
+      const probe = inspectPlacedControl(preObs, postObs);
+      const classification = classifyTypeFromProbe(field.canonical_type, probe);
+
+      if (classification.matches) {
+        const paletteName = typeBinding.recipe[0]?.evidence_name ?? '';
+        const paletteEl = preObs.elements.find((e) => e.name === paletteName);
+        const upgraded = makeTypeBinding(
+          field.canonical_type, probe, paletteName, paletteEl?.handle ?? '',
+        );
+        this.typeBindings[field.canonical_type] = upgraded;
+        typeBinding = upgraded;
+        this.journal.note(
+          `${this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id} > ` +
+          `${this.irFormMap.get(item.form_id)?.name ?? item.form_id}`,
+          `"${paletteName}" confirmed as ${field.canonical_type} by read-back ` +
+          `(role ${probe.observedRole}); every later field of this type uses it.`,
+        );
+      } else {
+        // The name said one thing and the control says another. Behaviour wins,
+        // but the disagreement is the human's to settle -- and it settles for
+        // every field of this type at once.
+        const affected = this.linearItems.filter(
+          (i) => i.kind === 'add' && i.canonical_type === field.canonical_type,
+        );
+        await applyTransition(this.adapter, this.runState, itemKey, 'verify_failed');
+        await this.escalateItem(itemKey, 'binding', {
+          key: itemKey,
+          groupKey: `type:${field.canonical_type}`,
+          blastRadius: {
+            fields: affected.length,
+            forms: new Set(affected.map((i) => i.form_id)).size,
+          },
+          fieldLabel: field.label,
+          formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+          visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+          canonicalType: field.canonical_type,
+          suspectedTrap:
+            'a palette entry whose name suggests one type can place another; ' +
+            'names are a hint, the placed control is the evidence',
+          reason:
+            `Placed "${typeBinding.recipe[0]?.evidence_name}" for ` +
+            `${field.canonical_type} and a ${probe.observedRole || 'unrecognised'} ` +
+            `control appeared instead.`,
+          evidence: [
+            `expected role: ${expectedRolesForType(field.canonical_type).join(' | ')}`,
+            `observed role: ${probe.observedRole || 'none'}`,
+            classification.evidence,
+            ...typeBinding.evidence,
+          ],
+          phase: 'binding',
+        }, /* blocking */ true);
+        return;
+      }
+    }
+
     if (!actOk || !elementAdded) {
       await applyTransition(this.adapter, this.runState, itemKey, 'verify_failed');
       const record = this.runState.items[itemKey];
@@ -1504,6 +1570,8 @@ export class Orchestrator {
           ],
           rung: 1,
           status: 'bound',
+          // Probe-confirmed: this control demonstrably persisted the work.
+          confidence: 'structural',
         };
         return;
       }

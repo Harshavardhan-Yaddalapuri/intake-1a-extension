@@ -282,6 +282,8 @@ export class ProbeRunner {
             ],
             rung: 1,
             status: 'bound',
+            // Probe-confirmed: this control demonstrably persisted the work.
+            confidence: 'structural',
           };
           return { commitBinding: binding, evidence };
         }
