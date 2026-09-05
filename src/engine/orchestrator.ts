@@ -74,7 +74,15 @@ import {
   enumerateByRoles,
   rankCandidates,
 } from '../bind/ranking';
-import { rankCommitCandidates, readObservedFields, bindFormListFields } from '../bind/rung0';
+import {
+  rankCommitCandidates,
+  readObservedFields,
+  bindFormListFields,
+  resolveFormOpenCandidates,
+  surfaceShowsForm,
+  rankAscendCandidates,
+  atVisitList,
+} from '../bind/rung0';
 import { Journal, type IrSource } from './journal';
 import { rankWithLlm } from '../bind/rung2';
 import { makeTypeBinding } from '../bind/rung1';
@@ -1112,34 +1120,86 @@ export class Orchestrator {
     const visit = this.irVisitMap.get(visitId);
     if (!visit) return;
 
-    // Navigate to study root first.
-    const { observation } = await this.driver.perceive();
-    const navBinding = this.bindings['nav.to_study_root'];
+    const visitNames = [...this.irVisitMap.values()].map((v) => v.name);
+    const createControl = this.bindings['visit.create']?.recipe?.[0]?.evidence_name;
 
-    if (navBinding && navBinding.recipe.length > 0) {
-      await this.executeRecipe(navBinding.recipe, null);
-      await this.sleep(500);
+    // Climb to the visit list, CONFIRMING arrival instead of assuming it.
+    // A single pre-bound "go to study root" click cannot do this job: on the
+    // supplied mock that control is the already-active nav tab and is inert at
+    // every depth, so the run silently stayed inside one visit and built every
+    // form into it.
+    const hops: string[] = [];
+    let reached = atVisitList(
+      (await this.driver.perceive()).observation, visitNames, createControl,
+    );
+    for (let hop = 0; hop < 4 && !reached; hop += 1) {
+      const { observation } = await this.driver.perceive();
+      const best = rankAscendCandidates(observation, visitNames)[0];
+      if (!best) break;
+      await this.driver.click(best.handle);
+      await this.sleep(450);
+      const { observation: after } = await this.driver.perceiveAfterSettle(200);
+      hops.push(best.name);
+      reached = atVisitList(after, visitNames, createControl);
     }
 
-    // Create the visit if it doesn't exist.
-    const { observation: rootObs } = await this.driver.perceive();
-    const visitLinks = rootObs.elements.filter(
-      (e) => (e.role === 'link' || e.role === 'button') && e.name === visit.name,
+    if (!reached) {
+      await this.escalateItem(`visit-nav:${visitId}`, 'acting', {
+        key: `visit-nav:${visitId}`,
+        fieldLabel: '(whole visit)',
+        canonicalType: 'text',
+        formName: '(none)',
+        visitName: visit.name,
+        suspectedTrap:
+          'The control that ascends is named after the level it leaves, so it ' +
+          'differs per level; a top-level nav item may look right and be inert.',
+        reason:
+          `Could not reach the visit list to open "${visit.name}". Nothing was ` +
+          `built for this visit rather than building it into whichever visit ` +
+          `was already open.`,
+        evidence: hops.length ? [`ascended via: ${hops.join(' -> ')}`] : ['no ascend candidate found'],
+        phase: 'acting',
+      }, /* blocking */ true);
+      return;
+    }
+
+    // Create the visit if it is not already listed.
+    const nameMatches = (o: Observation) => enumerateActionable(o).find(
+      (e) => normaliseLabel(e.name) === normaliseLabel(visit.name),
     );
 
-    if (visitLinks.length === 0) {
-      // Visit doesn't exist -- create it.
+    if (!nameMatches((await this.driver.perceive()).observation)) {
       await this.createVisit(visit);
+      await this.sleep(300);
     }
 
-    // Open the visit.
-    const { observation: afterCreate } = await this.driver.perceive();
-    const visitLink = afterCreate.elements.find(
-      (e) => (e.role === 'link' || e.role === 'button') && e.name === visit.name,
-    );
-    if (visitLink) {
-      await this.driver.click(visitLink.handle);
+    // Open it, then confirm THIS visit opened before recording that it did.
+    const { observation: listed } = await this.driver.perceiveAfterSettle(200);
+    const link = nameMatches(listed);
+    let opened = false;
+    if (link) {
+      await this.driver.click(link.handle);
       await this.sleep(500);
+      const { observation: after } = await this.driver.perceiveAfterSettle(250);
+      // We have descended out of the visit list into this visit's contents.
+      opened = !atVisitList(after, visitNames, createControl);
+    }
+
+    if (!opened) {
+      await this.escalateItem(`visit-open:${visitId}`, 'acting', {
+        key: `visit-open:${visitId}`,
+        fieldLabel: '(whole visit)',
+        canonicalType: 'text',
+        formName: '(none)',
+        visitName: visit.name,
+        reason:
+          `Reached the visit list but could not confirm "${visit.name}" opened` +
+          `${link ? '' : ' (it was not listed after creation)'}. Its forms are ` +
+          `not being built, to avoid adding them to another visit.`,
+        evidence: [`visit control ${link ? `"${link.name}" clicked` : 'not found'}`],
+        phase: 'acting',
+      }, /* blocking */ true);
+      return;
     }
 
     this.currentVisitId = visitId;
@@ -1200,28 +1260,66 @@ export class Orchestrator {
     const form = this.irFormMap.get(formId);
     if (!form) return;
 
-    // Check if the form already exists in the current visit's document list.
-    const { observation } = await this.driver.perceive();
-    const formLink = observation.elements.find(
-      (e) => (e.role === 'link' || e.role === 'button' || e.role === 'cell') &&
-        (e.name === form.name || e.name.toLowerCase().includes(form.name.toLowerCase())),
-    );
+    // Sibling forms sharing this visit's list. Used to tell the list screen
+    // (many forms named) from a designer surface (one form named).
+    const siblings = (this.irVisitMap.get(visitId)?.forms ?? [])
+      .map((f) => f.name)
+      .filter((n) => n !== form.name);
 
-    if (!formLink) {
-      // Form doesn't exist -- create it.
+    // Does the form already exist? Resolved by the row that BEARS ITS NAME,
+    // never by the open-control's own label: a list of N forms renders N
+    // identical "Edit" controls, so matching on the control always returns the
+    // first row and silently builds every form into whichever sits on top.
+    let { observation } = await this.driver.perceive();
+    if (resolveFormOpenCandidates(observation, form.name).length === 0) {
       await this.createForm(form);
+      ({ observation } = await this.driver.perceiveAfterSettle(250));
     }
 
-    // Open the form (click edit/open/modify button).
-    const { observation: afterCreate } = await this.driver.perceive();
-    const editLink = afterCreate.elements.find(
-      (e) => (e.role === 'link' || e.role === 'button') &&
-        (e.name === form.name || e.name.toLowerCase().includes('edit') ||
-         e.name.toLowerCase().includes('modify') || e.name.toLowerCase().includes('open')),
-    );
-    if (editLink) {
-      await this.driver.click(editLink.handle);
+    // Open it, then CONFIRM which form actually opened. Ranking only sets the
+    // trial order; the read-back adjudicates.
+    const candidates = resolveFormOpenCandidates(observation, form.name);
+    let opened = false;
+    for (const cand of candidates.slice(0, 3)) {
+      await this.driver.click(cand.handle);
       await this.sleep(500);
+      const { observation: after } = await this.driver.perceiveAfterSettle(250);
+      if (surfaceShowsForm(after, form.name, siblings)) {
+        opened = true;
+        break;
+      }
+      // Wrong surface. Back out and try the next candidate rather than
+      // building this form's fields into whatever is on screen.
+      const back = rankCandidates(enumerateActions(after), { hint: 'discard' })[0]?.el;
+      if (back) {
+        await this.driver.click(back.handle);
+        await this.sleep(400);
+      }
+    }
+
+    if (!opened) {
+      // Never claim a form is open when the read-back disagrees: that is the
+      // failure that silently writes 195 fields into the wrong document.
+      await this.escalateItem(`form-open:${formId}`, 'acting', {
+        key: `form-open:${formId}`,
+        fieldLabel: '(whole form)',
+        canonicalType: 'text',
+        formName: form.name,
+        visitName: this.irVisitMap.get(visitId)?.name ?? visitId,
+        suspectedTrap:
+          'Every row in a document list tends to render an identically named ' +
+          'open control; the form name lives beside it, not on it.',
+        reason:
+          `Could not confirm the designer for "${form.name}" opened. Tried ` +
+          `${candidates.length} candidate control(s); the surface never showed ` +
+          `this form. Its fields are NOT being built to avoid writing them into ` +
+          `another document.`,
+        evidence: candidates.slice(0, 3).map(
+          (c) => `${c.role} "${c.name}" in group "${c.groupText ?? ''}"`,
+        ),
+        phase: 'acting',
+      }, /* blocking */ true);
+      return;
     }
 
     this.currentFormId = formId;
@@ -1364,28 +1462,88 @@ export class Orchestrator {
       }
     }
 
-    // Fallback: work down the ranked commit trial order. Nothing is excluded
-    // by name -- the decoy is caught by analyzeCommit observing that the
-    // working copy did not change, not by recognising its label.
-    const saveButtons = rankCommitCandidates(observation).map((r) => r.el);
+    // Fallback: actually work DOWN the ranked trial order, rather than trying
+    // the top candidate once and giving up. Nothing is excluded by name --
+    // decoys are demoted in the ranking and still probed -- and the decoy is
+    // identified by analyzeCommit observing that the working copy did not
+    // change, not by recognising its label.
+    //
+    // This loop is what the previous single-shot version was supposed to be.
+    // On the supplied mock "Save As Template" and "Save" tie on the word
+    // "save", DOM order put the decoy first, it was clicked once, correctly
+    // reported as not-a-commit, and then the form was abandoned uncommitted
+    // and its entire contents lost on the next navigation.
+    const trials = rankCommitCandidates(observation).map((r) => r.el);
+    const MAX_COMMIT_TRIALS = 6;
+    const attempted: string[] = [];
 
-    if (saveButtons.length > 0) {
-      await this.driver.click(saveButtons[0].handle, false);
+    for (const candidate of trials.slice(0, MAX_COMMIT_TRIALS)) {
+      const before = await this.driver.perceive();
+      const clicked = await this.driver.click(candidate.handle, false);
+      if (!clicked.ok) continue;
+      attempted.push(candidate.name);
+
       await this.sleep(400);
       const post = await this.driver.perceiveAfterSettle(300);
-      const commitCheck = analyzeCommit(observation, post.observation);
+      const commitCheck = analyzeCommit(before.observation, post.observation);
+
       if (commitCheck.committed) {
         this.bindings['ctx.commit'] = {
           op: 'ctx.commit',
           version: 1,
-          recipe: [{ step: 'click', evidence_role: 'button', evidence_name: saveButtons[0].name, handle_kind: 'snapshot-id' }],
+          recipe: [{
+            step: 'click',
+            evidence_role: candidate.role,
+            evidence_name: candidate.name,
+            handle_kind: 'snapshot-id',
+          }],
           post_condition: { description: 'committed' },
-          evidence: commitCheck.evidence,
+          evidence: [
+            ...commitCheck.evidence,
+            `confirmed after trying: ${attempted.join(' -> ')}`,
+          ],
           rung: 1,
           status: 'bound',
         };
+        return;
       }
     }
+
+    // Nothing committed. This is the single most expensive silent failure in
+    // the contract -- everything built in this form is about to be discarded
+    // by the next navigation -- so it escalates rather than passing quietly.
+    const formName = this.currentFormId
+      ? this.irFormMap.get(this.currentFormId)?.name ?? this.currentFormId
+      : 'the open form';
+    this.journal.note(
+      this.currentFormId ?? 'commit',
+      `could not commit "${formName}": tried ${attempted.length} candidate(s) ` +
+      `(${attempted.join(', ') || 'none clickable'}) and none cleared the ` +
+      `working copy. Work in this form is unsaved.`,
+    );
+    this.callbacks.onEscalation({
+      key: `commit:${this.currentFormId ?? 'unknown'}`,
+      // How this platform persists a form is ONE decision, not one per form.
+      // Ungrouped, this asked again for every one of the 28 appearances and
+      // turned the build into an interrupt-driven review session.
+      groupKey: 'commit:platform',
+      fieldLabel: formName,
+      formName,
+      visitName: this.currentVisitId
+        ? this.irVisitMap.get(this.currentVisitId)?.name ?? this.currentVisitId
+        : '',
+      canonicalType: 'text',
+      reason:
+        `Could not save "${formName}". Tried ${attempted.length} control(s) and ` +
+        `none of them actually persisted the working copy.`,
+      suspectedTrap:
+        'a control that looks like save may only be filing the form away ' +
+        'under a reusable name; everything built in this form is unsaved and ' +
+        'will be lost on navigation',
+      evidence: attempted.map((n) => `clicked "${n}" -- working copy unchanged`),
+      phase: 'acting',
+      blocking: true,
+    });
   }
 
   // -------------------------------------------------------------------------

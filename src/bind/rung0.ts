@@ -25,6 +25,7 @@ import type { Observation, ObservationElement } from '../perceive/core';
 import {
   enumerateActionable,
   enumerateByRoles,
+  largestControlCluster,
   rankCandidates,
   explainRanking,
   type RankedCandidate,
@@ -308,6 +309,157 @@ export function bindFormOpen(obs: Observation): BindingRecord | null {
     [explainRanking(best, pool.length)],
     'hypothesis',
   );
+}
+
+/** Trim, collapse internal whitespace, case-fold. Applied to both sides of
+ *  every group-text comparison so padding and casing cannot hide a match. */
+function normaliseText(s: string): string {
+  return s.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+/**
+ * Resolve the control that opens ONE NAMED form, scoped to the group that
+ * bears that name.
+ *
+ * A platform listing N forms renders N identical open-controls ("Edit",
+ * "Open", a pencil glyph). Selecting by the control's own name can only ever
+ * return the first of them, which silently builds every form's fields into
+ * whichever form happens to sit at the top of the list. The distinguishing
+ * information lives beside the control, in the row that names the form, which
+ * is what `groupText` carries.
+ *
+ * Returns candidates in trial order, best first. Empty means the named form is
+ * not on screen — the caller must treat that as "not present", never fall back
+ * to another form's control.
+ */
+export function resolveFormOpenCandidates(
+  obs: Observation,
+  formName: string,
+): ObservationElement[] {
+  const target = normaliseText(formName);
+  if (!target) return [];
+
+  const withGroups = enumerateActionable(obs).filter((e) => e.groupText);
+
+  // Names in a real study overlap: "Concomitant Medications" is a substring of
+  // "Prior and Concomitant Medications". Group text starts with the name cell,
+  // so a prefix match distinguishes them; containment is the weaker fallback.
+  const prefix = withGroups.filter((e) => normaliseText(e.groupText!).startsWith(target));
+  const pool = prefix.length > 0
+    ? prefix
+    : withGroups.filter((e) => normaliseText(e.groupText!).includes(target));
+
+  if (pool.length === 0) return [];
+
+  // Lexical hints only order the trial; the caller's read-back adjudicates.
+  return rankCandidates(pool, { hint: 'form_open' }).map((r) => r.el);
+}
+
+/** Weight for a candidate that names a context the caller already knows about
+ *  (a visit from the input file). Deliberately larger than any lexical hint:
+ *  "the control that names my parent" is evidence, where a word is a guess. */
+const ASCEND_PARENT_NAME_BONUS = 10;
+
+/**
+ * Rank the controls that move UP a level, toward the visit list.
+ *
+ * Two things make this harder than it looks, both observed live:
+ *
+ * 1. A top-level nav item can be inert. On the supplied mock "Study Plan" is
+ *    the active tab, so clicking it does nothing at any depth — it binds green
+ *    and never moves. Only the breadcrumb ascends, and its NAME CHANGES per
+ *    level ("← Screening", "← Visit Schedule"), so no fixed word finds it.
+ * 2. Trial-and-error is destructive here. The `visit_list` hint contains
+ *    "list", which matches a palette entry called "Check List"; clicking it
+ *    adds a control to the form under construction. So the palette is removed
+ *    structurally — as a cluster of sibling controls, not by name — before any
+ *    ranking happens.
+ *
+ * `contextNames` are names the caller already knows (the input file's visits).
+ * A breadcrumb out of a form designer names its visit, which is far stronger
+ * evidence than any English word, and it is data the agent was given rather
+ * than vocabulary it guessed.
+ */
+export function rankAscendCandidates(
+  obs: Observation,
+  contextNames: readonly string[] = [],
+): ObservationElement[] {
+  const pool = enumerateActionable(obs);
+  if (pool.length === 0) return [];
+
+  // Structural exclusion: the palette is a cluster of sibling controls.
+  // Removing it by shape is legitimate; removing it by name would not be.
+  const cluster = largestControlCluster(pool);
+  const excluded = new Set((cluster?.members ?? []).map((e) => e.handle));
+  const safe = pool.filter((e) => !excluded.has(e.handle));
+  if (safe.length === 0) return [];
+
+  const known = contextNames.map(normaliseText).filter(Boolean);
+
+  return rankCandidates(safe, { hint: 'visit_list' })
+    .map((r) => ({
+      el: r.el,
+      score: r.score + (known.some((n) => normaliseText(r.el.name).includes(n))
+        ? ASCEND_PARENT_NAME_BONUS
+        : 0),
+    }))
+    .sort((a, b) => b.score - a.score)
+    .map((x) => x.el);
+}
+
+/**
+ * Read-back for "am I at the visit list?" — the screen where visits can be
+ * created and opened.
+ *
+ * Recognised by the input file's own visit names appearing as actionable
+ * controls, never by a screen title or heading word. Before the first visit
+ * exists there are no such names, so the control that pre-flight bound to
+ * `visit.create` is accepted as the second witness: it is present on the visit
+ * list and nowhere else. Used here as evidence, not as an action.
+ */
+export function atVisitList(
+  obs: Observation,
+  visitNames: readonly string[],
+  createControlName?: string,
+): boolean {
+  const actionable = enumerateActionable(obs);
+
+  const wanted = visitNames.map(normaliseText).filter(Boolean);
+  if (wanted.length > 0 && actionable.some((e) => wanted.includes(normaliseText(e.name)))) {
+    return true;
+  }
+
+  const create = createControlName ? normaliseText(createControlName) : '';
+  return create !== '' && actionable.some((e) => normaliseText(e.name) === create);
+}
+
+/**
+ * Read-back for form.open: is the surface now showing THIS form's designer?
+ *
+ * Presence of the name alone is not proof — the list screen names every form.
+ * The discriminator is that a designer shows one form where a list shows many,
+ * so the sibling forms sharing that list must have gone. Names that overlap the
+ * target ("Concomitant Medications" inside "Prior and Concomitant Medications")
+ * are excluded from the sibling set, since their text cannot be attributed.
+ */
+export function surfaceShowsForm(
+  obs: Observation,
+  formName: string,
+  siblingNames: readonly string[] = [],
+): boolean {
+  const target = normaliseText(formName);
+  if (!target) return false;
+
+  const text = obs.elements
+    .map((e) => normaliseText(`${e.name} ${e.groupText ?? ''}`))
+    .join(' | ');
+  if (!text.includes(target)) return false;
+
+  const others = siblingNames
+    .map(normaliseText)
+    .filter((n) => n && n !== target && !n.includes(target) && !target.includes(n));
+
+  return !others.some((n) => text.includes(n));
 }
 
 /**
@@ -714,7 +866,7 @@ export function bindCtxCommit(obs: Observation): BindingRecord | null {
   const pool = enumerateActionable(obs);
   if (pool.length === 0) return null;
 
-  const ranked = rankCandidates(pool, { hint: 'commit' });
+  const ranked = rankCandidates(pool, { hint: 'commit', demote: ['template', 'discard'] });
   const best = ranked[0];
 
   return makeBinding(
@@ -733,7 +885,14 @@ export function bindCtxCommit(obs: Observation): BindingRecord | null {
 /** The full trial order for the commit probe. Exported so ProbeRunner works
  *  down the ranked list instead of testing a name-filtered subset. */
 export function rankCommitCandidates(obs: Observation): RankedCandidate[] {
-  return rankCandidates(enumerateActionable(obs), { hint: 'commit' });
+  // Decoys are demoted, not removed: a control that files work away under a
+  // reusable name ("Save As Template") ties with the real save control on the
+  // word "save" alone, and DOM order then decides -- which on the supplied
+  // mock put the decoy first and silently lost an entire form's work.
+  return rankCandidates(enumerateActionable(obs), {
+    hint: 'commit',
+    demote: ['template', 'discard'],
+  });
 }
 
 /**
