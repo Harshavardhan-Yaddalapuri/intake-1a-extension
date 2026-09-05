@@ -79,6 +79,18 @@ export const LEXICAL_HINTS: Record<HintKey, readonly string[]> = {
  *  a control whose label happens to contain an English word we guessed. */
 const WEIGHT = {
   lexical: 1,
+  /** An EXACT name match is stronger evidence than a substring one: "Save" is
+   *  the save control; "Save As Template" merely contains the word and is a
+   *  different control entirely -- the decoy the brief warns about.
+   *
+   *  Still deliberately below inDiff. Structural evidence outranks vocabulary
+   *  even when the vocabulary matches perfectly: a control that appeared in
+   *  the diff we just caused is better evidence than a word we guessed. */
+  lexicalExact: 2,
+  /** A candidate matching a hint list the caller named as a known decoy.
+   *  Demoted, never excluded: it still gets probed, just last, so a platform
+   *  where our guess about what is a decoy is wrong still recovers. */
+  demoted: -4,
   actionable: 1,
   inRegion: 2,
   primary: 2,
@@ -101,6 +113,10 @@ export interface RankedCandidate {
 export interface RankOptions {
   /** Which lexical hint list to consult, if any. */
   hint?: HintKey;
+  /** Hint lists whose members are known decoys for THIS question. Matching
+   *  candidates are pushed down the trial order rather than removed, so the
+   *  probe still reaches them if the ranking guessed wrong. */
+  demote?: readonly HintKey[];
   /** Handles that appeared in the most recent diff. Strong structural signal. */
   diffAdded?: readonly string[];
   /** Handle prefix bounding the region of interest. */
@@ -235,12 +251,32 @@ export function rankCandidates(
     const signals: RankSignal[] = [];
     const lower = el.name.toLowerCase();
 
+    const trimmed = lower.trim();
     for (const word of hints) {
+      if (trimmed === word) {
+        signals.push({
+          name: 'lexical-exact',
+          weight: WEIGHT.lexicalExact,
+          detail: `name is exactly "${word}"`,
+        });
+        break;
+      }
       if (lower.includes(word)) {
         signals.push({
           name: 'lexical',
           weight: WEIGHT.lexical,
           detail: `name contains "${word}" (weak hint only)`,
+        });
+        break;
+      }
+    }
+
+    for (const decoyHint of options.demote ?? []) {
+      if (LEXICAL_HINTS[decoyHint].some((w) => lower.includes(w))) {
+        signals.push({
+          name: 'decoy',
+          weight: WEIGHT.demoted,
+          detail: `name matches the "${decoyHint}" list -- a known decoy for this question, tried last`,
         });
         break;
       }
