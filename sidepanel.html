@@ -164,17 +164,65 @@
       background: var(--surface2);
       color: var(--text-muted);
     }
-    .escalation-item .context { color: var(--text-muted); font-size: 11px; }
-    .escalation-item .reason { margin: 6px 0; color: var(--warning); font-size: 12px; }
-    .escalation-item .trap { color: var(--danger); font-style: italic; font-size: 11px; }
-    .escalation-item .evidence {
+    /* Where this item lives, first thing on the card. Muted grey for the
+       path, bright for the leaf, so the eye lands on the thing itself. */
+    .escalation-item .loc {
       font-size: 11px;
       color: var(--text-muted);
-      margin: 4px 0;
+      margin-bottom: 6px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+      word-break: break-word;
+    }
+    .escalation-item .loc b { color: var(--text); font-weight: 600; }
+    .escalation-item .loc .sep { opacity: 0.5; margin: 0 4px; }
+    .escalation-item .reason { margin: 6px 0; font-size: 12px; color: var(--text); }
+    .escalation-item .trap { color: var(--text-muted); font-style: italic; font-size: 11px; }
+    /* Plain-language statement of what the buttons will actually do here. */
+    .escalation-item .ask {
+      font-size: 11px;
+      margin: 8px 0 6px;
+      padding: 6px 8px;
+      border-radius: 3px;
+      background: rgba(64,158,255,0.09);
+      border-left: 2px solid var(--info);
+      color: var(--text);
+    }
+    .escalation-item details.evidence { margin: 6px 0; }
+    .escalation-item details.evidence summary {
+      font-size: 11px; color: var(--text-muted); cursor: pointer; user-select: none;
+    }
+    .escalation-item details.evidence .body {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 4px;
       padding: 4px 8px;
       background: rgba(0,0,0,0.2);
       border-radius: 3px;
+      word-break: break-word;
     }
+    /* Only a genuinely blocking item is allowed to look alarming. Parked
+       items previously carried the same warning colour and icon, which made
+       a long review pile read as 71 emergencies. */
+    .escalation-item.blocking { border-left: 3px solid var(--warning); }
+    .escalation-item.parked   { border-left: 3px solid var(--border); opacity: 0.94; }
+    .queue-heading {
+      font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em;
+      margin: 14px 0 2px; display: flex; align-items: center; gap: 6px;
+    }
+    .queue-heading.blocking { color: var(--warning); }
+    .queue-heading.parked   { color: var(--text-muted); }
+    .queue-heading span {
+      font-size: 10px; background: var(--surface2); color: var(--text-muted);
+      border-radius: 8px; padding: 1px 7px; letter-spacing: 0;
+    }
+    .queue-sub { font-size: 11px; color: var(--text-muted); margin: 0 0 8px; }
+    .queue-legend {
+      font-size: 11px; color: var(--text-muted); line-height: 1.6;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 8px 10px; margin-bottom: 10px;
+    }
+    .queue-legend b { color: var(--text); font-weight: 600; }
     /* Binding report */
     .binding-row {
       display: flex;
@@ -298,10 +346,28 @@
   <!-- Ambiguity Queue Tab -->
   <section id="queue" class="panel">
     <div id="queue-status" class="status-banner idle">No escalations yet</div>
-    <div id="queue-actions" class="hidden" style="margin-bottom:10px;">
-      <button class="btn btn-sm btn-primary" id="approve-all-btn">✓ Approve All Remaining</button>
+
+    <div id="queue-legend" class="queue-legend hidden">
+      <b>Approve</b> — accept what the agent did and move on.
+      <b>Change</b> — pick a different control, then it retries.
+      <b>Skip</b> — leave it unbuilt and flag it in the report.
+      Nothing here is lost: every choice is recorded in the audit trail.
     </div>
-    <div id="queue-items"></div>
+
+    <div id="queue-blocking-group" class="hidden">
+      <h3 class="queue-heading blocking">Waiting on you<span id="queue-blocking-count"></span></h3>
+      <p class="queue-sub">The build is paused until these are answered.</p>
+      <div id="queue-blocking"></div>
+    </div>
+
+    <div id="queue-parked-group" class="hidden">
+      <h3 class="queue-heading parked">Review when you like<span id="queue-parked-count"></span></h3>
+      <p class="queue-sub">The build carried on without these. Nothing is blocked.</p>
+      <div id="queue-actions" class="hidden" style="margin-bottom:10px;">
+        <button class="btn btn-sm btn-primary" id="approve-all-btn">✓ Approve all parked items</button>
+      </div>
+      <div id="queue-parked"></div>
+    </div>
   </section>
 
   <!-- Report Tab -->
