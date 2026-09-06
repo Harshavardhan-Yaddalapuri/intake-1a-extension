@@ -441,6 +441,28 @@ export interface CommitProbeResult {
   evidence: string[];
 }
 
+/**
+ * Are these two observations of the SAME surface?
+ *
+ * Committing clears a marker; leaving clears the screen. Used both to keep a
+ * navigation from being recorded as a commit, and to stop a trial loop that
+ * has wandered off the form it was trying to save.
+ */
+export function sameSurface(before: Observation, after: Observation): boolean {
+  const words = (obs: Observation) => {
+    const out = new Set<string>();
+    for (const e of obs.elements) {
+      for (const w of (e.groupText ?? '').toLowerCase().split(/\s+/)) if (w) out.add(w);
+    }
+    return out;
+  };
+  const b = words(before);
+  if (b.size === 0) return true;
+  const a = words(after);
+  const retained = [...b].filter((w) => a.has(w)).length;
+  return retained / b.size >= 0.5;
+}
+
 export function analyzeCommit(
   beforeObs: Observation,
   afterObs: Observation,
@@ -469,6 +491,38 @@ export function analyzeCommit(
   const after = new Set(statusText(afterObs));
   const clearedIndicators = before.filter((name) => !after.has(name));
 
+  // The indicator usually is not an element of its own. `observe` reports only
+  // INTERACTIVE elements, so a platform that states its working-copy state in
+  // plain text ("v1 - Draft - Unsaved changes" beside the buttons) contributes
+  // no status element at all, and the comparison above has nothing to compare.
+  // That text is still observed -- as the groupText of the controls it sits
+  // with -- so the same question is asked there.
+  //
+  // Word LOSS, not word change: a real commit removes the pending marker,
+  // while a decoy only adds an announcement of its own ("Saved as a reusable
+  // template"), leaving the marker in place. Comparing sets of words rather
+  // than whole strings is what tells those two apart, and it reads no
+  // vocabulary -- only what stopped being displayed.
+  const groupWords = (obs: Observation) => {
+    const words = new Set<string>();
+    for (const e of obs.elements) {
+      for (const w of (e.groupText ?? '').toLowerCase().split(/\s+/)) {
+        if (w) words.add(w);
+      }
+    }
+    return words;
+  };
+  const wordsBefore = groupWords(beforeObs);
+  const wordsAfter = groupWords(afterObs);
+  const lost = [...wordsBefore].filter((w) => !wordsAfter.has(w));
+
+  // Committing clears a marker; LEAVING clears the screen. Without this, a
+  // control that navigates away -- discarding the working copy on the way out,
+  // which is the trap this whole probe exists to survive -- would lose every
+  // word at once and be recorded as the platform's save control. A commit is
+  // only credible while we are demonstrably still on the same surface.
+  const lostWords = sameSurface(beforeObs, afterObs) ? lost : [];
+
   // Second structural signal: a live region appeared. An ARIA status/alert
   // region is how a platform announces the outcome of an action, and its mere
   // APPEARANCE is structural -- no vocabulary needed to notice it.
@@ -490,7 +544,8 @@ export function analyzeCommit(
   const addedIndicators = announcements.filter((e) => !matchesHint(e.name, 'template'));
   const decoyAnnouncements = announcements.filter((e) => matchesHint(e.name, 'template'));
 
-  const committed = clearedIndicators.length > 0 || addedIndicators.length > 0;
+  const committed =
+    clearedIndicators.length > 0 || addedIndicators.length > 0 || lostWords.length > 0;
 
   if (committed) {
     return {
@@ -501,6 +556,9 @@ export function analyzeCommit(
           : []),
         ...(addedIndicators.length > 0
           ? [`persisted-state indicator appeared: ${addedIndicators.map((i) => i.name).join(', ')}`]
+          : []),
+        ...(lostWords.length > 0
+          ? [`working-copy text no longer displayed: ${lostWords.join(' ')}`]
           : []),
         'commit probe: persisted',
       ],

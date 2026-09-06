@@ -66,9 +66,8 @@ import {
   expectedRolesForType,
 } from '../bind/rung0';
 import { ProbeRunner } from './probe-runner';
-import { analyzeCommit } from '../bind/rung1';
+import { analyzeCommit, sameSurface } from '../bind/rung1';
 import {
-  LEXICAL_HINTS,
   enumerateActionable,
   enumerateActions,
   enumerateByRoles,
@@ -93,14 +92,6 @@ import {
   type FormReconcileResult,
   type TreeSummary,
 } from './reconcile';
-
-/** Does this name read like a working-copy / persisted-state indicator?
- *  Weak corroboration only -- analyzeCommit's structural before/after
- *  comparison is the authoritative signal. Word list lives in ranking.ts. */
-function matchesStatusHint(name: string): boolean {
-  const n = name.toLowerCase();
-  return LEXICAL_HINTS.status.some((w) => n.includes(w));
-}
 
 // ---------------------------------------------------------------------------
 // Orchestrator.
@@ -141,6 +132,17 @@ export class Orchestrator {
   private bindings: Partial<Record<ContractOpId, BindingRecord>> = {};
   /** Per-type bindings (field.add for each canonical type). */
   private typeBindings: Partial<Record<CanonicalType, BindingRecord>> = {};
+
+  /** Accessible names seen on the visit list -- a surface with no working copy.
+   *  Anything still offered inside the form designer is application chrome, so
+   *  it cannot be the control that commits the working copy. */
+  private crossScreenChrome: Set<string> = new Set();
+
+  /** Types whose read-back was deferred until their coded values exist, keyed
+   *  to the observation taken before the control was placed. A choice control
+   *  with no options yet renders no options: its role cannot be read until
+   *  set_coded_values has run. See adjudicateType. */
+  private deferredTypeProbe: Map<CanonicalType, Observation> = new Map();
 
   /** Escalation queue: items waiting for human input. */
   private escalationQueue: Map<string, { resolve: (d: HumanDecision) => void }> = new Map();
@@ -559,16 +561,27 @@ export class Orchestrator {
         await this.commitCurrentForm();
       }
 
-      // Navigate to the correct visit if context changed.
+      // Navigate to the correct visit if context changed. A visit we could not
+      // open is a visit we do not build: its steps are skipped, not written
+      // into whichever visit is still on screen.
       if (item.visit_id !== prevVisitId) {
-        await this.navigateToVisit(item.visit_id);
+        if (!(await this.navigateToVisit(item.visit_id))) {
+          i = this.skipSpan(i, (it) => it.visit_id === item.visit_id);
+          prevVisitId = '';
+          prevFormId = '';
+          continue;
+        }
         prevVisitId = item.visit_id;
         prevFormId = ''; // Force form navigation too.
       }
 
       // Navigate to the correct form if context changed.
       if (item.form_id !== prevFormId) {
-        await this.navigateToForm(item.visit_id, item.form_id);
+        if (!(await this.navigateToForm(item.visit_id, item.form_id))) {
+          i = this.skipSpan(i, (it) => it.form_id === item.form_id);
+          prevFormId = '';
+          continue;
+        }
         prevFormId = item.form_id;
       }
 
@@ -585,6 +598,19 @@ export class Orchestrator {
     if (prevFormId !== '') {
       await this.commitCurrentForm();
     }
+  }
+
+  /**
+   * Advance past every remaining step in an unreachable span, leaving them
+   * unverified so the summary reports them missing. navigateTo* has already
+   * escalated; this only stops the steps from running in the wrong place.
+   * Returns the last index consumed (the for-loop's i++ moves past it).
+   */
+  private skipSpan(from: number, inSpan: (it: LinearItem) => boolean): number {
+    let i = from;
+    while (i + 1 < this.linearItems.length && inSpan(this.linearItems[i + 1])) i += 1;
+    this.runState.cursor = i + 1;
+    return i;
   }
 
   // -------------------------------------------------------------------------
@@ -875,59 +901,11 @@ export class Orchestrator {
     // Runs once per canonical type: a confirmed mapping is upgraded to
     // `structural` and cached, so the cost is bounded by 13, not by 195.
     if (elementAdded && typeBinding.confidence !== 'structural') {
-      const probe = inspectPlacedControl(preObs, postObs);
-      const classification = classifyTypeFromProbe(field.canonical_type, probe);
-
-      if (classification.matches) {
-        const paletteName = typeBinding.recipe[0]?.evidence_name ?? '';
-        const paletteEl = preObs.elements.find((e) => e.name === paletteName);
-        const upgraded = makeTypeBinding(
-          field.canonical_type, probe, paletteName, paletteEl?.handle ?? '',
-        );
-        this.typeBindings[field.canonical_type] = upgraded;
-        typeBinding = upgraded;
-        this.journal.note(
-          `${this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id} > ` +
-          `${this.irFormMap.get(item.form_id)?.name ?? item.form_id}`,
-          `"${paletteName}" confirmed as ${field.canonical_type} by read-back ` +
-          `(role ${probe.observedRole}); every later field of this type uses it.`,
-        );
-      } else {
-        // The name said one thing and the control says another. Behaviour wins,
-        // but the disagreement is the human's to settle -- and it settles for
-        // every field of this type at once.
-        const affected = this.linearItems.filter(
-          (i) => i.kind === 'add' && i.canonical_type === field.canonical_type,
-        );
-        await applyTransition(this.adapter, this.runState, itemKey, 'verify_failed');
-        await this.escalateItem(itemKey, 'binding', {
-          key: itemKey,
-          groupKey: `type:${field.canonical_type}`,
-          blastRadius: {
-            fields: affected.length,
-            forms: new Set(affected.map((i) => i.form_id)).size,
-          },
-          fieldLabel: field.label,
-          formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
-          visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
-          canonicalType: field.canonical_type,
-          suspectedTrap:
-            'a palette entry whose name suggests one type can place another; ' +
-            'names are a hint, the placed control is the evidence',
-          reason:
-            `Placed "${typeBinding.recipe[0]?.evidence_name}" for ` +
-            `${field.canonical_type} and a ${probe.observedRole || 'unrecognised'} ` +
-            `control appeared instead.`,
-          evidence: [
-            `expected role: ${expectedRolesForType(field.canonical_type).join(' | ')}`,
-            `observed role: ${probe.observedRole || 'none'}`,
-            classification.evidence,
-            ...typeBinding.evidence,
-          ],
-          phase: 'binding',
-        }, /* blocking */ true);
-        return;
-      }
+      const settled = await this.adjudicateType(
+        item, itemKey, field, preObs, postObs, /* mayDefer */ true,
+      );
+      if (!settled) return;
+      typeBinding = this.typeBindings[field.canonical_type] ?? typeBinding;
     }
 
     if (!actOk || !elementAdded) {
@@ -1033,6 +1011,103 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * Decide whether the control that appeared is the type the input file asked
+   * for, and act on the answer: confirm and cache the mapping, defer it, or
+   * hand the disagreement to a human.
+   *
+   * Returns false when the caller must stop (the item escalated).
+   *
+   * The deferral is the point. A choice control renders its options and
+   * nothing else, so before `set_coded_values` runs there is no radiogroup to
+   * see -- the read-back would be judging a control the platform has not
+   * realised yet. Absent evidence is not contradictory evidence, so the
+   * question is asked again once the values exist rather than answered wrong
+   * now. Live, this escalated all 10 radio fields on a mapping that was
+   * correct.
+   */
+  private async adjudicateType(
+    item: LinearItem,
+    itemKey: string,
+    field: IrField,
+    preObs: Observation,
+    postObs: Observation,
+    mayDefer: boolean,
+  ): Promise<boolean> {
+    const typeBinding = this.typeBindings[field.canonical_type];
+    if (!typeBinding) return true;
+
+    const scope =
+      `${this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id} > ` +
+      `${this.irFormMap.get(item.form_id)?.name ?? item.form_id}`;
+    const probe = inspectPlacedControl(preObs, postObs);
+    const classification = classifyTypeFromProbe(field.canonical_type, probe);
+
+    if (classification.matches) {
+      this.deferredTypeProbe.delete(field.canonical_type);
+      const paletteName = typeBinding.recipe[0]?.evidence_name ?? '';
+      const paletteEl = preObs.elements.find((e) => e.name === paletteName);
+      this.typeBindings[field.canonical_type] = makeTypeBinding(
+        field.canonical_type, probe, paletteName, paletteEl?.handle ?? '',
+      );
+      this.journal.note(
+        scope,
+        `"${paletteName}" confirmed as ${field.canonical_type} by read-back ` +
+        `(role ${probe.observedRole}); every later field of this type uses it.`,
+      );
+      return true;
+    }
+
+    // Nothing to read yet: this control's type IS its options, and they have
+    // not been entered. Ask again after set_coded_values.
+    if (mayDefer && probe.observedOptions.length === 0 && (field.options?.length ?? 0) > 0) {
+      this.deferredTypeProbe.set(field.canonical_type, preObs);
+      this.journal.note(
+        scope,
+        `${field.canonical_type} read-back deferred: the placed control has no ` +
+        `options yet (saw role ${probe.observedRole || 'none'}), so its type is ` +
+        `not observable until the coded values are entered.`,
+      );
+      return true;
+    }
+
+    // The name said one thing and the control says another. Behaviour wins,
+    // but the disagreement is the human's to settle -- and it settles for
+    // every field of this type at once.
+    this.deferredTypeProbe.delete(field.canonical_type);
+    const affected = this.linearItems.filter(
+      (i) => i.kind === 'add' && i.canonical_type === field.canonical_type,
+    );
+    await applyTransition(this.adapter, this.runState, itemKey, 'verify_failed');
+    await this.escalateItem(itemKey, 'binding', {
+      key: itemKey,
+      groupKey: `type:${field.canonical_type}`,
+      blastRadius: {
+        fields: affected.length,
+        forms: new Set(affected.map((i) => i.form_id)).size,
+      },
+      fieldLabel: field.label,
+      formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+      visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+      canonicalType: field.canonical_type,
+      suspectedTrap:
+        'a palette entry whose name suggests one type can place another; ' +
+        'names are a hint, the placed control is the evidence',
+      reason:
+        `Placed "${typeBinding.recipe[0]?.evidence_name}" for ` +
+        `${field.canonical_type} and a ${probe.observedRole || 'unrecognised'} ` +
+        `control appeared instead.`,
+      evidence: [
+        `expected role: ${expectedRolesForType(field.canonical_type).join(' | ')}`,
+        `observed role: ${probe.observedRole || 'none'}`,
+        classification.evidence,
+        ...typeBinding.evidence,
+      ],
+      phase: 'binding',
+    }, /* blocking */ true);
+    return false;
+  }
+
   private async executeFieldSetCodedValues(
     item: LinearItem,
     itemKey: string,
@@ -1040,40 +1115,61 @@ export class Orchestrator {
   ): Promise<void> {
     if (!field.options || field.options.length === 0) return;
 
-    const { observation } = await this.driver.perceive();
+    const codesOf = (o: Observation) => findByRole(o, 'textbox', { contains: 'code' });
+    // The element's OWN label field is also named "Label", and it already
+    // holds the field name. Row labels are aligned from the END, where the
+    // count of row labels equals the count of code inputs, so the field's own
+    // label can never be mistaken for an option's and overwritten with it.
+    const rowLabelsOf = (o: Observation, codeCount: number) => {
+      const codes = codesOf(o);
+      const labels = findByRole(o, 'textbox', { contains: 'label' })
+        .filter((c) => !codes.some((ci) => ci.el.handle === c.el.handle));
+      return labels.slice(Math.max(0, labels.length - codeCount));
+    };
+    const addRowControlOf = (o: Observation) =>
+      findByRole(o, 'button', { contains: 'add' })
+        .filter((b) => b.el.name.toLowerCase().includes('value'))[0]?.el;
 
-    // Strategy: find code + label input pairs and an "add value" button,
-    // then enter each coded pair one at a time.
-    const codeInputs = findByRole(observation, 'textbox', { contains: 'code' });
-    const labelInputs = findByRole(observation, 'textbox', { contains: 'label' })
-      .filter((c) => !codeInputs.some((ci) => ci.el.handle === c.el.handle));
-    const addButtons = findByRole(observation, 'button', { contains: 'add' })
-      .filter((b) => b.el.name.toLowerCase().includes('value'));
+    // An editor that renders one row per existing value offers NO code/label
+    // inputs until a row exists, so the row-adding control has to be pressed
+    // before there is anything to type into. The previous order -- type, then
+    // press add -- could never start on such a platform: it required the
+    // inputs it was there to create, found none, and silently entered nothing.
+    // Editors that keep a blank row ready need no press, and land in the same
+    // place.
+    //
+    // ponytail: per-row entry only. A platform offering ONLY a bulk paste box
+    // needs its format guessed, which is not generalisable; add a fallback
+    // when one such platform is actually in hand.
+    for (let i = 0; i < field.options.length; i += 1) {
+      const pair = field.options[i];
+      let { observation } = await this.driver.perceive();
+      let codes = codesOf(observation);
 
-    if (codeInputs.length > 0 && labelInputs.length > 0) {
-      // Two-column editor: enter pairs one at a time.
-      for (const pair of field.options) {
-        // Re-observe to get fresh handles after each add.
-        const { observation: freshObs } = await this.driver.perceive();
-        const freshCodeInputs = findByRole(freshObs, 'textbox', { contains: 'code' });
-        const freshLabelInputs = findByRole(freshObs, 'textbox', { contains: 'label' })
-          .filter((c) => !freshCodeInputs.some((ci) => ci.el.handle === c.el.handle));
-
-        if (freshCodeInputs.length > 0) {
-          await this.driver.setValue(freshCodeInputs[freshCodeInputs.length - 1].el.handle, pair.code);
-        }
-        if (freshLabelInputs.length > 0) {
-          await this.driver.setValue(freshLabelInputs[freshLabelInputs.length - 1].el.handle, pair.label);
-        }
-
-        // Click "add value" button.
-        const freshAddButtons = findByRole(freshObs, 'button', { contains: 'add' })
-          .filter((b) => b.el.name.toLowerCase().includes('value'));
-        if (freshAddButtons.length > 0) {
-          await this.driver.click(freshAddButtons[0].el.handle);
-          await this.sleep(200); // Brief settle.
-        }
+      if (codes.length <= i) {
+        const add = addRowControlOf(observation);
+        if (!add) break;
+        await this.driver.click(add.handle);
+        await this.sleep(200);
+        ({ observation } = await this.driver.perceive());
+        codes = codesOf(observation);
+        if (codes.length <= i) break; // the control did not add a row
       }
+
+      const rowLabels = rowLabelsOf(observation, codes.length);
+      await this.driver.setValue(codes[i].el.handle, pair.code);
+      if (rowLabels[i]) await this.driver.setValue(rowLabels[i].el.handle, pair.label);
+    }
+
+    // The options now exist, so the control finally shows what it is. Settle
+    // any read-back this type deferred at add time.
+    const deferredFrom = this.deferredTypeProbe.get(field.canonical_type);
+    if (deferredFrom) {
+      this.deferredTypeProbe.delete(field.canonical_type);
+      const { observation: realised } = await this.driver.perceiveAfterSettle(250);
+      await this.adjudicateType(
+        item, itemKey, field, deferredFrom, realised, /* mayDefer */ false,
+      );
     }
   }
 
@@ -1180,11 +1276,11 @@ export class Orchestrator {
   // Navigation.
   // -------------------------------------------------------------------------
 
-  private async navigateToVisit(visitId: string): Promise<void> {
-    if (this.currentVisitId === visitId) return;
+  private async navigateToVisit(visitId: string): Promise<boolean> {
+    if (this.currentVisitId === visitId) return true;
 
     const visit = this.irVisitMap.get(visitId);
-    if (!visit) return;
+    if (!visit) return false;
 
     const visitNames = [...this.irVisitMap.values()].map((v) => v.name);
     const createControl = this.bindings['visit.create']?.recipe?.[0]?.evidence_name;
@@ -1226,7 +1322,17 @@ export class Orchestrator {
         evidence: hops.length ? [`ascended via: ${hops.join(' -> ')}`] : ['no ascend candidate found'],
         phase: 'acting',
       }, /* blocking */ true);
-      return;
+      return false;
+    }
+
+    // Remember what this surface offers. There is no working copy on the visit
+    // list, so nothing reachable from here can be the control that commits
+    // one -- these are the application's chrome, present on every screen. The
+    // commit search uses this to avoid probing navigation: clicking a nav tab
+    // to find out whether it saves is destructive on any platform where
+    // navigating away discards the draft, and this one does exactly that.
+    for (const el of enumerateActionable((await this.driver.perceive()).observation)) {
+      if (el.name) this.crossScreenChrome.add(normaliseLabel(el.name));
     }
 
     // Create the visit if it is not already listed.
@@ -1265,16 +1371,30 @@ export class Orchestrator {
         evidence: [`visit control ${link ? `"${link.name}" clicked` : 'not found'}`],
         phase: 'acting',
       }, /* blocking */ true);
-      return;
+      return false;
     }
 
     this.currentVisitId = visitId;
     this.currentFormId = null;
+    return true;
   }
 
   private async createVisit(visit: IrVisit): Promise<void> {
+    // Every step here is journalled. A visit that fails to appear is otherwise
+    // indistinguishable from a dialog that never opened, a name that never
+    // landed, or a commit control that did nothing -- and the run cannot say
+    // which, because none of it was recorded.
+    const trace: string[] = [];
+    const say = (s: string) => { trace.push(s); };
+    const done = () => this.journal.note(`visit.create:${visit.name}`, trace.join(' | '));
+
     const createBinding = this.bindings['visit.create'];
-    if (!createBinding) return;
+    if (!createBinding) {
+      say('ABORTED: visit.create never bound, so nothing was attempted');
+      done();
+      return;
+    }
+    say(`binding recipe steps=${createBinding.recipe.length}`);
 
     // Click the "add visit" button.
     if (createBinding.recipe.length > 0) {
@@ -1284,18 +1404,24 @@ export class Orchestrator {
       // Remember the pre-dialog surface so the controls the dialog brings with
       // it can be told apart from the page chrome that was always there.
       this.preDialogObs = observation;
+      say(`add control=${addBtn ? JSON.stringify(addBtn.name) : 'NONE FOUND'}`);
       if (addBtn) {
         await this.driver.click(addBtn.handle);
         await this.sleep(300);
       }
+    } else {
+      say('add control NOT clicked: recipe is empty');
     }
 
     // Fill in the visit name.
     const { observation: formObs } = await this.driver.perceive();
     const textPool = enumerateByRoles(formObs, ['textbox', 'searchbox']);
+    say(`text inputs after opening=[${textPool.map((e) => e.name).join(', ')}]`);
     const nameBox = rankCandidates(textPool, { hint: 'name_input' })[0]?.el;
+    say(`name input=${nameBox ? JSON.stringify(nameBox.name) : 'NONE FOUND'}`);
     if (nameBox) {
-      await this.driver.setValue(nameBox.handle, visit.name);
+      const wrote = await this.driver.setValue(nameBox.handle, visit.name);
+      if (!wrote.ok) say(`name write FAILED: ${wrote.error ?? 'unknown'}`);
     }
 
     // Fill in the visit window. Both bounds are ranked over the same pool and
@@ -1311,23 +1437,35 @@ export class Orchestrator {
       await this.driver.setValue(endBox.handle, String(visit.window_end_day));
     }
 
-    // Click save.
+    // Click save. Read the name field back FIRST: a platform that silently
+    // drops the write (its own draft never updated) looks identical to one
+    // that saved nothing, and only this distinguishes them.
     const { observation: saveObs } = await this.driver.perceive();
+    const nameNow = nameBox
+      ? enumerateByRoles(saveObs, ['textbox', 'searchbox'])
+          .find((e) => e.handle === nameBox.handle)?.state.value
+      : undefined;
+    say(`name reads back as ${JSON.stringify(nameNow ?? null)} (wanted ${JSON.stringify(visit.name)})`);
+
     const saveBtn = this.pickDialogCommit(saveObs);
+    say(`commit control=${saveBtn ? JSON.stringify(saveBtn.name) : 'NONE FOUND'}`);
     if (saveBtn) {
-      await this.driver.click(saveBtn.handle, false);
+      const clicked = await this.driver.click(saveBtn.handle, false);
+      if (!clicked.ok) say(`commit click FAILED: ${clicked.error ?? 'unknown'}`);
       await this.sleep(500);
     }
+    done();
   }
 
-  private async navigateToForm(visitId: string, formId: string): Promise<void> {
-    if (this.currentFormId === formId) return;
+  private async navigateToForm(visitId: string, formId: string): Promise<boolean> {
+    if (this.currentFormId === formId) return true;
 
     const form = this.irFormMap.get(formId);
-    if (!form) return;
+    if (!form) return false;
 
     // Sibling forms sharing this visit's list. Used to tell the list screen
     // (many forms named) from a designer surface (one form named).
+    const visitName = this.irVisitMap.get(visitId)?.name ?? visitId;
     const siblings = (this.irVisitMap.get(visitId)?.forms ?? [])
       .map((f) => f.name)
       .filter((n) => n !== form.name);
@@ -1337,20 +1475,41 @@ export class Orchestrator {
     // identical "Edit" controls, so matching on the control always returns the
     // first row and silently builds every form into whichever sits on top.
     let { observation } = await this.driver.perceive();
-    if (resolveFormOpenCandidates(observation, form.name).length === 0) {
+
+    // "Not visible" and "does not exist" are different claims, and the run
+    // used to treat the first as the second. After a form is built the agent
+    // is standing INSIDE that form's designer, where no document list exists
+    // to search -- so every later form in the visit found zero candidates,
+    // was "created" onto the designer surface, and escalated. Live, that cost
+    // 24 of 28 forms while all four visits sat there correctly created.
+    //
+    // So before concluding a form is absent, go and look from the surface
+    // that lists forms. Re-opening the visit lands there and is already
+    // read-back confirmed; clearing currentVisitId is what stops
+    // navigateToVisit short-circuiting on "we are already there".
+    if (resolveFormOpenCandidates(observation, form.name, [visitName]).length === 0) {
+      this.currentVisitId = null;
+      if (await this.navigateToVisit(visitId)) {
+        ({ observation } = await this.driver.perceiveAfterSettle(250));
+      }
+    }
+
+    if (resolveFormOpenCandidates(observation, form.name, [visitName]).length === 0) {
       await this.createForm(form);
       ({ observation } = await this.driver.perceiveAfterSettle(250));
     }
 
     // Open it, then CONFIRM which form actually opened. Ranking only sets the
     // trial order; the read-back adjudicates.
-    const candidates = resolveFormOpenCandidates(observation, form.name);
+    const candidates = resolveFormOpenCandidates(observation, form.name, [visitName]);
     let opened = false;
     for (const cand of candidates.slice(0, 3)) {
       await this.driver.click(cand.handle);
       await this.sleep(500);
       const { observation: after } = await this.driver.perceiveAfterSettle(250);
-      if (surfaceShowsForm(after, form.name, siblings)) {
+      // The visit name is page furniture here, not a form row: its breadcrumb
+      // is on screen whichever surface this is.
+      if (surfaceShowsForm(after, form.name, siblings, [visitName])) {
         opened = true;
         break;
       }
@@ -1385,7 +1544,7 @@ export class Orchestrator {
         ),
         phase: 'acting',
       }, /* blocking */ true);
-      return;
+      return false;
     }
 
     this.currentFormId = formId;
@@ -1439,15 +1598,34 @@ export class Orchestrator {
         }
       }
     }
+    return true;
   }
 
   private async discoverFormBuilder(): Promise<void> {
     const { observation } = await this.driver.perceive();
 
-    // Bind all rung 0 operations available on the builder screen
+    // Adopt only what the BUILDER owns. Re-binding everything from this screen
+    // rebinds controls that live elsewhere against whatever happens to look
+    // similar here: "+ Page" (add a page to this form) satisfies the same
+    // add-ish shape as "+ Add Visit", so visit.create silently became "+ Page"
+    // the moment the first form was opened. Every later visit was then
+    // "created" by adding a page to the open form and typing the visit name
+    // into the palette's filter box -- and because atVisitList accepts the
+    // create control as proof of arrival, the run believed it was standing on
+    // the visit list while it was inside the designer. Three of four visits
+    // were lost to this.
+    //
+    // Navigation, visit and document-lifecycle ops keep the bindings they got
+    // on the surfaces where those controls actually live.
+    const BUILDER_OWNED: readonly ContractOpId[] = [
+      'field.add', 'field.set_label', 'field.set_required', 'field.set_range',
+      'field.set_coded_values', 'field.set_skip_logic',
+      'ctx.commit', 'ctx.is_committed', 'ctx.discard',
+      'form.list_fields', 'field_palette.open',
+    ];
     const builderBindings = bindAllRung0(observation);
     for (const [op, binding] of Object.entries(builderBindings)) {
-      if (binding) {
+      if (binding && BUILDER_OWNED.includes(op as ContractOpId)) {
         this.bindings[op as ContractOpId] = binding;
       }
     }
@@ -1508,23 +1686,56 @@ export class Orchestrator {
    * Commit the currently open form builder working copy.
    * Confirms persistence indicators (dirty banner cleared / draft -> saved / active).
    */
+  /**
+   * Close whatever a click opened, so the next action runs on the surface it
+   * expects rather than through a dialog left standing.
+   *
+   * Only controls that ARRIVED with the overlay are considered, and only if
+   * one of them reads as a dismissal -- so this cannot wander off clicking
+   * page furniture when nothing actually opened. Verified by read-back: the
+   * controls that appeared have to be gone again.
+   */
+  private async dismissOverlay(before: Observation, after: Observation): Promise<void> {
+    const appeared = diffObservations(before, after).added;
+    if (appeared.length === 0) return;
+
+    const arrivals = enumerateActions(after).filter((e) => appeared.includes(e.handle));
+    const dismiss = rankCandidates(arrivals, { hint: 'discard' })[0];
+    if (!dismiss || !dismiss.signals.some((s) => s.name === 'lexical')) return;
+
+    await this.driver.click(dismiss.el.handle);
+    await this.sleep(300);
+    const { observation: restored } = await this.driver.perceiveAfterSettle(200);
+    const stillOpen = enumerateActions(restored).some((e) => appeared.includes(e.handle));
+    this.journal.note(
+      'ctx.commit',
+      `a trial opened something; dismissed it with "${dismiss.el.name}" -- ` +
+      `${stillOpen ? 'IT IS STILL OPEN' : 'surface restored'}`,
+    );
+  }
+
   private async commitCurrentForm(): Promise<void> {
     const { observation } = await this.driver.perceive();
 
-    // Try ctx.commit binding if already resolved
+    // Try ctx.commit binding if already resolved.
+    //
+    // Judged by the SAME structural test as the fallback below: did an
+    // indicator the platform was showing disappear? The previous check asked
+    // whether any status-ish word was still on screen, and the word list holds
+    // both halves of the distinction ('saved' and 'unsaved', 'draft' and
+    // 'committed'). A successful save therefore proved itself a failure -- the
+    // platform's own "Saved." announcement matched, as did the lifecycle word
+    // "Draft", which has nothing to do with whether the working copy is
+    // pending. Live, this reported a correctly-saved form as uncommitted and
+    // then probed four navigation tabs looking for a better one.
     const saveBinding = this.bindings['ctx.commit'];
     if (saveBinding && saveBinding.recipe.length > 0) {
+      const before = await this.driver.perceive();
       const ok = await this.executeRecipe(saveBinding.recipe, null);
       if (ok) {
         await this.sleep(400);
         const post = await this.driver.perceiveAfterSettle(300);
-        // Whether a working-copy indicator is still showing. Word list lives
-        // in ranking.ts; the authoritative signal is analyzeCommit's structural
-        // before/after comparison, which ran above.
-        const hasUnsaved = post.observation.elements.some(
-          (e) => e.name.length > 0 && matchesStatusHint(e.name),
-        );
-        if (!hasUnsaved) return;
+        if (analyzeCommit(before.observation, post.observation).committed) return;
       }
     }
 
@@ -1539,7 +1750,9 @@ export class Orchestrator {
     // "save", DOM order put the decoy first, it was clicked once, correctly
     // reported as not-a-commit, and then the form was abandoned uncommitted
     // and its entire contents lost on the next navigation.
-    const trials = rankCommitCandidates(observation).map((r) => r.el);
+    const trials = rankCommitCandidates(observation)
+      .map((r) => r.el)
+      .filter((el) => !this.crossScreenChrome.has(normaliseLabel(el.name)));
     const MAX_COMMIT_TRIALS = 6;
     const attempted: string[] = [];
 
@@ -1552,6 +1765,29 @@ export class Orchestrator {
       await this.sleep(400);
       const post = await this.driver.perceiveAfterSettle(300);
       const commitCheck = analyzeCommit(before.observation, post.observation);
+
+      if (!commitCheck.committed) {
+        // Did that click leave the surface entirely? Predicting it beforehand
+        // does not work -- the ascend ranker misses a breadcrumb here and
+        // flags "+ Page", which goes nowhere -- but noticing it afterwards is
+        // exact. Whatever this control was, we are no longer on the form, so
+        // every further trial would click a foreign screen. Stop.
+        if (!sameSurface(before.observation, post.observation)) {
+          this.journal.note(
+            'ctx.commit',
+            `"${candidate.name}" left the form surface rather than committing it; ` +
+            `abandoning the search here instead of clicking on whatever it opened`,
+          );
+          break;
+        }
+
+        // Still here, but the click may have OPENED something -- a preview, a
+        // dialog. Left standing it covers the surface for every later trial and
+        // for whatever the run does next: live, an unclosed preview made the
+        // following form's designer unreachable and its open-control search saw
+        // zero candidates. Put the surface back.
+        await this.dismissOverlay(before.observation, post.observation);
+      }
 
       if (commitCheck.committed) {
         this.bindings['ctx.commit'] = {

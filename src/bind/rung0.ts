@@ -335,19 +335,37 @@ function normaliseText(s: string): string {
 export function resolveFormOpenCandidates(
   obs: Observation,
   formName: string,
+  contextNames: readonly string[] = [],
 ): ObservationElement[] {
   const target = normaliseText(formName);
   if (!target) return [];
+
+  // Page furniture is removed before matching. The visit's own name sits in the
+  // breadcrumb and heading of its document list, and it may CONTAIN a form's
+  // name: visit "End of Treatment (Week 12)" contains the form "End of
+  // Treatment". Left in, every control on the page inherits that text through
+  // its group and matches, so a form that does not exist reads as existing and
+  // is never created -- live, that was the one form of 28 that went missing.
+  //
+  // A context name identical to the form's is not removed: there would be
+  // nothing left to match on.
+  const context = contextNames
+    .map(normaliseText)
+    .filter((c) => c && c !== target && c.includes(target));
+  const groupOf = (e: ObservationElement) => {
+    const raw = normaliseText(e.groupText!);
+    return context.reduce((t, c) => t.split(c).join(' '), raw);
+  };
 
   const withGroups = enumerateActionable(obs).filter((e) => e.groupText);
 
   // Names in a real study overlap: "Concomitant Medications" is a substring of
   // "Prior and Concomitant Medications". Group text starts with the name cell,
   // so a prefix match distinguishes them; containment is the weaker fallback.
-  const prefix = withGroups.filter((e) => normaliseText(e.groupText!).startsWith(target));
+  const prefix = withGroups.filter((e) => groupOf(e).startsWith(target));
   const pool = prefix.length > 0
     ? prefix
-    : withGroups.filter((e) => normaliseText(e.groupText!).includes(target));
+    : withGroups.filter((e) => groupOf(e).includes(target));
 
   if (pool.length === 0) return [];
 
@@ -446,6 +464,7 @@ export function surfaceShowsForm(
   obs: Observation,
   formName: string,
   siblingNames: readonly string[] = [],
+  contextNames: readonly string[] = [],
 ): boolean {
   const target = normaliseText(formName);
   if (!target) return false;
@@ -455,9 +474,23 @@ export function surfaceShowsForm(
     .join(' | ');
   if (!text.includes(target)) return false;
 
+  // Names that belong to the page's own furniture rather than to a form row --
+  // the visit this designer sits under, whose breadcrumb is on screen either
+  // way. A sibling whose name is contained in one of them cannot be told from
+  // that furniture by text alone, so its presence proves nothing about which
+  // surface this is.
+  //
+  // Live (2026-09-06): visit "End of Treatment (Week 12)" contains the form
+  // name "End of Treatment". Every one of that visit's other six forms was
+  // rejected -- the breadcrumb alone looked like a sibling row -- and only
+  // "End of Treatment" itself, which is excluded from its own sibling set,
+  // could be opened.
+  const context = contextNames.map(normaliseText).filter(Boolean);
+
   const others = siblingNames
     .map(normaliseText)
-    .filter((n) => n && n !== target && !n.includes(target) && !target.includes(n));
+    .filter((n) => n && n !== target && !n.includes(target) && !target.includes(n))
+    .filter((n) => !context.some((c) => c.includes(n)));
 
   return !others.some((n) => text.includes(n));
 }
