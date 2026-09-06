@@ -177,7 +177,31 @@
     .escalation-item .loc b { color: var(--text); font-weight: 600; }
     .escalation-item .loc .sep { opacity: 0.5; margin: 0 4px; }
     .escalation-item .reason { margin: 6px 0; font-size: 12px; color: var(--text); }
+    /* The concrete instruction: which screen to open and what to look for.
+       Reviewers act from this line, so it reads as an instruction rather than
+       as more description. */
+    .escalation-item .check {
+      font-size: 11.5px;
+      margin: 6px 0;
+      padding: 6px 8px;
+      border-radius: 3px;
+      background: var(--surface2);
+      color: var(--text);
+      line-height: 1.45;
+    }
     .escalation-item .trap { color: var(--text-muted); font-style: italic; font-size: 11px; }
+
+    /* Severity, carried by the card edge. A queue of a hundred items is
+       triaged by scanning, and the one item that loses work must not look
+       like the ninety-nine that are merely worth a glance. */
+    .escalation-item[data-risk="data-loss"] {
+      border-left: 3px solid var(--danger, #e05252);
+      background: rgba(224,82,82,0.06);
+    }
+    .escalation-item[data-risk="data-loss"] .field-name { color: var(--danger, #e05252); }
+    .escalation-item[data-risk="not-built"] { border-left: 3px solid var(--warn, #d99b32); }
+    .escalation-item[data-risk="not-built"] .field-name { color: var(--warn, #d99b32); }
+    .escalation-item[data-risk="may-be-wrong"] { border-left: 3px solid var(--border); }
     /* Plain-language statement of what the buttons will actually do here. */
     .escalation-item .ask {
       font-size: 11px;

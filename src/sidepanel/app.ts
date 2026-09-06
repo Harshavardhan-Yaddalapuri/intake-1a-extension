@@ -288,14 +288,136 @@ function locationLine(item: EscalationItem): string {
 /** A short title for what went wrong. The location line already says WHERE,
  *  so this says WHAT — the old card led with the field name and repeated it. */
 function headline(item: EscalationItem): string {
-  if (item.blastRadius && item.blastRadius.fields > 1) return 'Type mapping unresolved';
-  switch (item.phase) {
-    case 'binding':   return 'No matching control found';
-    case 'acting':    return 'Could not confirm the action worked';
-    case 'verifying': return 'What was built does not match the file';
-    default:          return 'Needs a decision';
-  }
+  // Lead with what is at stake, not with which internal stage produced the
+  // finding. A reviewer triaging a long queue needs to see "work will be lost"
+  // separated from "built, worth a look" at a glance -- live, the one form that
+  // was genuinely unsaved sat among 99 cosmetic items and read identically.
+  return RISK_LABEL[plainFinding(item).risk];
 }
+
+/** The control the input file asked for, named the way a coordinator would
+ *  name it rather than by its canonical type. */
+const CONTROL_IN_WORDS: Record<string, string> = {
+  text: 'a single-line text box',
+  textarea: 'a multi-line text box',
+  integer: 'a whole number',
+  decimal: 'a number that can have decimals',
+  date: 'a date',
+  time: 'a time',
+  datetime: 'a date and time',
+  boolean: 'a yes/no answer',
+  single_select: 'a dropdown — pick one',
+  multi_select: 'a tick-box list — pick any number',
+  radio: 'radio buttons — pick exactly one',
+  checkbox: 'a single tick box',
+  calculated: 'a calculated field',
+};
+
+interface PlainFinding {
+  /** What happened, in the reviewer's vocabulary. */
+  what: string;
+  /** What to go and look at, concretely. */
+  check: string;
+  /** Whether anything is actually at stake. */
+  risk: 'data-loss' | 'may-be-wrong' | 'not-built';
+}
+
+/**
+ * Say the finding in the language of the study.
+ *
+ * The reviewer is a coordinator, not an engineer: "element", "role",
+ * "accessible name" and "fresh observation" are the agent's words for its own
+ * internals and mean nothing at the point of review. The engine's exact wording
+ * is kept, in the evidence panel, for the audit trail.
+ */
+function plainFinding(item: EscalationItem): PlainFinding {
+  const r = item.reason;
+  const field = item.fieldLabel;
+  const wanted = CONTROL_IN_WORDS[item.canonicalType] ?? item.canonicalType;
+  const where = [item.visitName, item.formName].filter(Boolean).join(' › ');
+
+  // The raiser's own statement wins over any reading of its prose.
+  if (item.severity === 'data-loss' || /could not commit|work in this form is unsaved/i.test(r)) {
+    return {
+      risk: 'data-loss',
+      what: `This form was never saved. Everything built in it is still a draft and will be lost.`,
+      check: `Open ${where || 'the form'} and press its Save button yourself, then Approve.`,
+    };
+  }
+
+  if (/could not confirm the designer|surface never showed this form/i.test(r)) {
+    return {
+      risk: 'not-built',
+      what: `I could not open this form, so none of its fields were built.`,
+      check: `Open ${where || 'the form'} and check whether it is empty. If it is, it needs building by hand.`,
+    };
+  }
+
+  if (/could not (reach|confirm).*visit|not listed after creation/i.test(r)) {
+    return {
+      risk: 'not-built',
+      what: `I could not open this visit, so nothing under it was built.`,
+      check: `Check the visit schedule for "${item.visitName}". If it is missing, it needs adding by hand.`,
+    };
+  }
+
+  if (/more than one element resolves/i.test(r)) {
+    return {
+      risk: 'may-be-wrong',
+      what: `I found more than one thing called "${field}" on this form, and stopped rather than ` +
+            `check the wrong one. Usually that means it was built twice.`,
+      check: `Open ${where} and count the fields named "${field}". One is correct — Approve. ` +
+             `More than one — delete the extras.`,
+    };
+  }
+
+  if (/no element with accessible name/i.test(r)) {
+    return {
+      risk: 'may-be-wrong',
+      what: `I built "${field}" (${wanted}) but could not find it again when I looked back at the form.`,
+      check: `Open ${where} and look for "${field}". If it is there and correct — Approve. ` +
+             `If it is missing — Skip, and it will be listed as not built.`,
+    };
+  }
+
+  if (/declares no range bounds|range/i.test(r) && /intent specifies/i.test(r)) {
+    return {
+      risk: 'may-be-wrong',
+      what: `"${field}" was built, but the allowed range the file asks for is not showing on it. ` +
+            `Some platforms drop a range when the field type changes.`,
+      check: `Open ${where}, select "${field}", and check its minimum and maximum.`,
+    };
+  }
+
+  if (/has role .* but intent .* expects/i.test(r)) {
+    return {
+      risk: 'may-be-wrong',
+      what: `"${field}" was built, but I could not confirm it is ${wanted}.`,
+      check: `Open ${where} and look at "${field}". If it behaves as "${wanted}" — Approve. ` +
+             `Otherwise use Change type.`,
+    };
+  }
+
+  if (item.phase === 'binding') {
+    return {
+      risk: 'not-built',
+      what: `Nothing on this platform matched ${wanted}, so "${field}" was not built.`,
+      check: `Use Change type to point me at the right control, or Skip to leave it out and record the gap.`,
+    };
+  }
+
+  return {
+    risk: 'may-be-wrong',
+    what: `"${field}" needs a second pair of eyes.`,
+    check: `Open ${where} and compare "${field}" against the study file.`,
+  };
+}
+
+const RISK_LABEL: Record<PlainFinding['risk'], string> = {
+  'data-loss': 'Work will be lost unless you act',
+  'not-built': 'Not built — missing from the study',
+  'may-be-wrong': 'Built — needs a look',
+};
 
 /** Changing the canonical type only means something when the item IS a type
  *  decision. Offering it on a whole-form failure invites a meaningless answer. */
@@ -349,6 +471,9 @@ function renderEscalationItem(item: EscalationItem): void {
     ? `Skip these ${item.blastRadius.fields}`
     : 'Skip it';
 
+  const plain = plainFinding(item);
+  el.dataset.risk = plain.risk;
+
   // The type badge is only meaningful when the item is actually about a field
   // of that type. On a whole-form or whole-visit escalation it is noise.
   const typeBadge = isScopePlaceholder(item.fieldLabel)
@@ -361,16 +486,15 @@ function renderEscalationItem(item: EscalationItem): void {
       <span class="field-name">${esc(headline(item))}</span>
       ${typeBadge}
     </div>
-    <div class="reason">${esc(item.reason)}</div>
+    <div class="reason">${esc(plain.what)}</div>
+    <div class="check"><b>What to check:</b> ${esc(plain.check)}</div>
     ${item.suspectedTrap ? `<div class="trap">Why this happens: ${esc(item.suspectedTrap)}</div>` : ''}
     ${radius}
     <div class="ask">${esc(actionExplanation(item))}</div>
-    ${item.evidence.length > 0
-      ? `<details class="evidence">
-           <summary>What the agent saw (${item.evidence.length})</summary>
-           <div class="body">${item.evidence.map(esc).join('<br>')}</div>
-         </details>`
-      : ''}
+    <details class="evidence">
+      <summary>Technical detail (for the audit trail)</summary>
+      <div class="body">${[item.reason, ...item.evidence].map(esc).join('<br>')}</div>
+    </details>
     <div class="btn-group">
       <button class="btn btn-sm btn-primary" data-action="approve" data-key="${item.key}">✓ Approve</button>
       ${offersTypeChange(item)
@@ -404,7 +528,16 @@ function renderEscalationItem(item: EscalationItem): void {
     });
   });
 
-  container.appendChild(el);
+  // Severest first. Cards arrive in build order, which buries the one item
+  // that loses work under however many merely want a second look -- live, an
+  // unsaved form sat at position 100 of 100. Insert ahead of the first card
+  // that matters less than this one; equal severity keeps build order.
+  const RANK: Record<string, number> = { 'data-loss': 0, 'not-built': 1, 'may-be-wrong': 2 };
+  const mine = RANK[plain.risk] ?? 3;
+  const after = [...container.children].find(
+    (c) => (RANK[(c as HTMLElement).dataset.risk ?? ''] ?? 3) > mine,
+  );
+  container.insertBefore(el, after ?? null);
   updateQueueStatus();
 }
 

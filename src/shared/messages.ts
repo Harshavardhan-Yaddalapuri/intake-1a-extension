@@ -188,6 +188,15 @@ export interface EscalationItem {
   /** How many other items share this decision. A type mapping affecting 14
    *  fields is one decision, not fourteen. */
   blastRadius?: { fields: number; forms: number };
+  /** What is actually at stake, stated by the code that raised the item rather
+   *  than inferred from its wording downstream.
+   *
+   *  `data-loss` means work already done will be lost unless someone acts. It
+   *  is the one severity a reviewer must not miss, and it must not depend on
+   *  the review screen recognising a phrase: reword the message and a silent
+   *  downgrade would bury it. Live, exactly one item of a hundred was this,
+   *  and it sat last in the queue looking like the other ninety-nine. */
+  severity?: 'data-loss' | 'not-built';
 }
 
 /** Shallow-pass reconcile result, shown on the pre-flight screen so the human

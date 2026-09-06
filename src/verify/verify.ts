@@ -73,6 +73,11 @@ export interface NameMatch {
   el: ObservationElement;
   /** True when the accessible name matched byte-for-byte. */
   exact: boolean;
+  /** True when the field was found as a GROUP OF OPTIONS ("Race: Asian",
+   *  "Race: White", ...) rather than as one control bearing its own name.
+   *  `el` is then one member of that group, so its role is the option's role
+   *  and not the field's. Only a choice type may be realised this way. */
+  viaOptionGroup?: boolean;
 }
 
 /** Resolve an intent label to at most one element.
@@ -109,7 +114,41 @@ export function resolveByName(
   const loose = obs.elements.filter((e) => accepted.has(normaliseLabel(e.name)));
   if (loose.length === 1) return { el: loose[0], exact: false };
   if (loose.length > 1) return 'ambiguous';
+
+  // A choice field is often not ONE control. Platforms realise "Sex at Birth"
+  // with three inputs named "Sex at Birth: Female", "Sex at Birth: Male",
+  // "Sex at Birth: Undisclosed" -- one per option, with no wrapper carrying the
+  // field's own name. Nothing is then named "Sex at Birth" and the field reads
+  // as missing, though it is built and correct. Live, that was every radio and
+  // every multi-select in the study.
+  //
+  // The shape is recognised structurally: several controls of the SAME role
+  // whose names all begin with the field's label and then diverge. Any single
+  // one of them stands for the field, since they share its role and answer for
+  // its value.
+  const optionsOf = optionGroup(obs, target);
+  if (optionsOf) return { el: optionsOf, exact: false, viaOptionGroup: true };
+
   return null;
+}
+
+/**
+ * The member of a same-role option group whose names all extend `target`, or
+ * undefined when the observation holds no such group. Returned rather than a
+ * synthetic element so callers still get a real handle to read state from.
+ */
+function optionGroup(obs: Observation, target: string): ObservationElement | undefined {
+  const members = obs.elements.filter((e) => {
+    const n = normaliseLabel(e.name);
+    if (n === target || !n.startsWith(target)) return false;
+    // A separator must follow the label, or "Height" would swallow
+    // "Height Velocity" -- two fields that really do coexist in studies.
+    return /^[\s:\-–—.,/|]/.test(n.slice(target.length));
+  });
+  if (members.length < 2) return undefined;
+
+  const roles = new Set(members.map((m) => m.role));
+  return roles.size === 1 ? members[0] : undefined;
 }
 
 /** Map a canonical type to the ARIA role(s) that realize it. This is the
@@ -181,7 +220,14 @@ export function compareIntent(obs: Observation, intent: IntentRecord): VerdictRe
 
   // Role check: does the control realize the intended semantic type?
   const roles = expectedRoles(intent.canonical_type);
-  const roleOk = roles.includes(el.role);
+  // A group of options realises a choice field even though each member reports
+  // the OPTION's role rather than the field's. Accepted only for a choice type
+  // and only when the group shape was actually observed: a single tick box
+  // named "Race" stays a boolean, which is the near-miss the brief warns sits
+  // one row away from a list-of-choices control.
+  const CHOICE_TYPES: CanonicalType[] = ['single_select', 'multi_select', 'radio'];
+  const roleOk = roles.includes(el.role)
+    || (match.viaOptionGroup === true && CHOICE_TYPES.includes(intent.canonical_type));
   if (!roleOk) {
     return {
       verdict: 'AMBIGUOUS',

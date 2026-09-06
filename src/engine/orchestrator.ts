@@ -133,6 +133,16 @@ export class Orchestrator {
   /** Per-type bindings (field.add for each canonical type). */
   private typeBindings: Partial<Record<CanonicalType, BindingRecord>> = {};
 
+  /** Fields whose read-back did not pass while the form was still being built.
+   *  Re-checked against the committed surface before anything is reported, so
+   *  a preview that has not caught up is never mistaken for missing work. */
+  private pendingVerification: Array<{
+    itemKey: string;
+    item: LinearItem;
+    field: IrField;
+    intent: IntentRecord;
+  }> = [];
+
   /** Accessible names seen on the visit list -- a surface with no working copy.
    *  Anything still offered inside the form designer is application chrome, so
    *  it cannot be the control that commits the working copy. */
@@ -559,6 +569,7 @@ export class Orchestrator {
       // If form context is changing, commit the current form first!
       if (prevFormId !== '' && item.form_id !== prevFormId) {
         await this.commitCurrentForm();
+        await this.settlePendingVerification();
       }
 
       // Navigate to the correct visit if context changed. A visit we could not
@@ -597,6 +608,7 @@ export class Orchestrator {
     // Commit the final form upon completion!
     if (prevFormId !== '') {
       await this.commitCurrentForm();
+      await this.settlePendingVerification();
     }
   }
 
@@ -1192,10 +1204,26 @@ export class Orchestrator {
       }
     }
 
-    // FINAL VERIFICATION OF THE FIELD:
-    // Read-back verification comparing semantic state against Intent Record
+    // FIRST LOOK. A pass here is real and costs nothing to accept.
+    //
+    // A miss is NOT yet a finding. The canvas a designer draws while you type
+    // is not required to keep up with what you typed: this platform re-renders
+    // only when the shape of the form changes, so a label and its units live in
+    // the platform's own state while the preview still shows the type's default
+    // name. Read then, "Height" is nowhere on screen although the field is
+    // built, has its range, and saves correctly. Live, that produced 59 reports
+    // of missing numeric fields, every one of them wrong.
+    //
+    // So anything that does not pass now is re-checked once the form is
+    // committed, which is the only surface that speaks for what was persisted
+    // -- and persistence is the thing being claimed.
     const { observation: finalObs } = await this.driver.perceiveAfterSettle(300);
     const verdict = compareIntent(finalObs, intent);
+
+    if (verdict.verdict !== 'VERIFIED') {
+      this.pendingVerification.push({ itemKey, item, field, intent });
+      return;
+    }
 
     if (verdict.verdict === 'VERIFIED') {
       await applyTransition(this.adapter, this.runState, itemKey, 'verify_verified');
@@ -1714,6 +1742,59 @@ export class Orchestrator {
     );
   }
 
+  /**
+   * Re-check every field whose read-back did not pass during the build, now
+   * that the form is committed and the surface reflects what was persisted.
+   * One observation settles the whole form. Only what still disagrees is
+   * reported, and it is reported once.
+   */
+  private async settlePendingVerification(): Promise<void> {
+    if (this.pendingVerification.length === 0) return;
+    const pending = this.pendingVerification;
+    this.pendingVerification = [];
+
+    const { observation } = await this.driver.perceiveAfterSettle(300);
+    let recovered = 0;
+
+    for (const { itemKey, item, field, intent } of pending) {
+      const verdict = compareIntent(observation, intent);
+
+      if (verdict.verdict === 'VERIFIED') {
+        await applyTransition(this.adapter, this.runState, itemKey, 'verify_verified');
+        recovered += 1;
+        continue;
+      }
+
+      await applyTransition(
+        this.adapter, this.runState, itemKey,
+        verdict.verdict === 'AMBIGUOUS' ? 'verify_ambiguous' : 'verify_failed',
+      );
+      await this.escalateItem(itemKey, 'verifying', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason: verdict.reason,
+        suspectedTrap: verdict.suspected_trap,
+        evidence: [verdict.reason, 're-checked after the form was saved'],
+        verdict,
+        phase: 'verifying',
+      }, /* blocking */ false);
+    }
+
+    if (recovered > 0) {
+      this.journal.note(
+        this.currentFormId
+          ? `${this.irVisitMap.get(this.currentVisitId ?? '')?.name ?? ''} > ` +
+            `${this.irFormMap.get(this.currentFormId)?.name ?? this.currentFormId}`
+          : 'verify',
+        `${recovered} of ${pending.length} field(s) read back correctly once the ` +
+        `form was saved; the preview had not caught up while they were built.`,
+      );
+    }
+  }
+
   private async commitCurrentForm(): Promise<void> {
     const { observation } = await this.driver.perceive();
 
@@ -1846,6 +1927,9 @@ export class Orchestrator {
         'will be lost on navigation',
       evidence: attempted.map((n) => `clicked "${n}" -- working copy unchanged`),
       phase: 'acting',
+      // Stated here, not inferred from the wording downstream: this is the one
+      // finding where work already done is lost if nobody acts.
+      severity: 'data-loss',
       blocking: true,
     });
   }
