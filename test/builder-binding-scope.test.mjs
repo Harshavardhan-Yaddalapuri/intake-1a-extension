@@ -54,7 +54,7 @@ const FOREIGN_OPS = [
 // The whitelist discoverFormBuilder applies.
 const BUILDER_OWNED = [
   'field.add', 'field.set_label', 'field.set_required', 'field.set_range',
-  'field.set_coded_values', 'field.set_skip_logic',
+  'field.set_coded_values', 'field.set_skip_logic', 'field.set_formula',
   'ctx.commit', 'ctx.is_committed', 'ctx.discard',
   'form.list_fields', 'field_palette.open',
 ];

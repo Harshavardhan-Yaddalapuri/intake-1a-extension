@@ -819,34 +819,29 @@ export function bindFieldSetRange(obs: Observation): BindingRecord | null {
 
 /**
  * Bind field.set_skip_logic: find the visibility/conditional control and
- * the trigger/condition inputs.
+ * the trigger/condition inputs via ranking (no English name gates).
  */
 export function bindFieldSetSkipLogic(obs: Observation): BindingRecord | null {
-  const visCandidates = findByRole(obs, 'combobox', { contains: 'visib' })
-    .concat(findByRole(obs, 'listbox', { contains: 'visib' }))
-    .concat(findByRole(obs, 'combobox', { contains: 'conditional' }))
-    .concat(findByRole(obs, 'combobox', { contains: 'when' }));
-
-  if (visCandidates.length === 0) return null;
+  const modePool = enumerateByRoles(obs, ['combobox', 'listbox']);
+  const mode = rankCandidates(modePool, { hint: 'visibility' })[0];
+  if (!mode) return null;
 
   const recipe: RecipeStep[] = [
-    { step: 'select_option', evidence_role: visCandidates[0].el.role, evidence_name: visCandidates[0].el.name, handle_kind: 'snapshot-id', from_list_exposed: true },
+    { step: 'select_option', evidence_role: mode.el.role, evidence_name: mode.el.name, handle_kind: 'snapshot-id', from_list_exposed: true },
   ];
-  const evidence = [visCandidates[0].evidence];
+  const evidence = [explainRanking(mode, modePool.length)];
 
-  // Also look for a trigger field selector and a value input.
-  const whenSelects = findByRole(obs, 'combobox', { contains: 'when' })
-    .concat(findByRole(obs, 'listbox', { contains: 'when' }));
-  const valueInputs = findByRole(obs, 'textbox', { contains: 'equal' })
-    .concat(findByRole(obs, 'textbox', { contains: 'value' }));
-
-  if (whenSelects.length > 0) {
-    recipe.push({ step: 'select_option', evidence_role: whenSelects[0].el.role, evidence_name: whenSelects[0].el.name, handle_kind: 'snapshot-id', from_list_exposed: true });
-    evidence.push(whenSelects[0].evidence);
+  const when = rankCandidates(modePool, { hint: 'skip_when', demote: ['visibility'] })[0];
+  if (when && when.el.handle !== mode.el.handle) {
+    recipe.push({ step: 'select_option', evidence_role: when.el.role, evidence_name: when.el.name, handle_kind: 'snapshot-id', from_list_exposed: true });
+    evidence.push(explainRanking(when, modePool.length));
   }
-  if (valueInputs.length > 0) {
-    recipe.push({ step: 'set_value', evidence_role: 'textbox', evidence_name: valueInputs[0].el.name, handle_kind: 'snapshot-id', value_from: 'ir' });
-    evidence.push(valueInputs[0].evidence);
+
+  const valuePool = enumerateByRoles(obs, ['textbox', 'searchbox']);
+  const value = rankCandidates(valuePool, { hint: 'skip_value' })[0];
+  if (value) {
+    recipe.push({ step: 'set_value', evidence_role: value.el.role, evidence_name: value.el.name, handle_kind: 'snapshot-id', value_from: 'ir' });
+    evidence.push(explainRanking(value, valuePool.length));
   }
 
   return makeBinding(
@@ -855,7 +850,26 @@ export function bindFieldSetSkipLogic(obs: Observation): BindingRecord | null {
     recipe,
     'conditional visibility is set on the element',
     evidence,
-    visCandidates[0].confidence,
+    mode.score > 0 ? 'hypothesis' : 'tentative',
+  );
+}
+
+/**
+ * Bind field.set_formula: locate the formula/expression textbox.
+ */
+export function bindFieldSetFormula(obs: Observation): BindingRecord | null {
+  const pool = enumerateByRoles(obs, ['textbox', 'searchbox']);
+  if (pool.length === 0) return null;
+  const best = rankCandidates(pool, { hint: 'formula' })[0];
+  if (!best) return null;
+
+  return makeBinding(
+    'field.set_formula',
+    0,
+    [{ step: 'set_value', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id', value_from: 'ir' }],
+    'the calculated formula/expression is set on the element',
+    [explainRanking(best, pool.length)],
+    best.score > 0 ? 'hypothesis' : 'tentative',
   );
 }
 
@@ -1063,6 +1077,8 @@ export function bindAllRung0(obs: Observation): Partial<Record<ContractOpId, Bin
   if (r10) results['field.set_range'] = r10;
   const r11 = bindFieldSetSkipLogic(obs);
   if (r11) results['field.set_skip_logic'] = r11;
+  const r11b = bindFieldSetFormula(obs);
+  if (r11b) results['field.set_formula'] = r11b;
   const r12 = bindFieldSetCodedValues(obs);
   if (r12) results['field.set_coded_values'] = r12;
   const r13 = bindCtxCommit(obs);

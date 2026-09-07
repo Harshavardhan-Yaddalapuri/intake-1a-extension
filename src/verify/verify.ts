@@ -37,6 +37,8 @@ export interface IntentRecord {
   coded_pairs?: CodedPair[];
   range_units?: RangeSpec;
   skip_rules?: SkipRule[];
+  /** Calculated-field expression. Compared when observable on the control. */
+  formula?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +408,26 @@ export function compareIntent(obs: Observation, intent: IntentRecord): VerdictRe
         'required flag not applied, or silently reset when the control type ' +
         'was changed',
     };
+  }
+
+  // Formula (calculated fields). Platforms often expose the expression on the
+  // control's value ("= Weight / ...") or leave it only in a property editor
+  // that is not this element. A PRESENT value that disagrees is a mismatch; an
+  // absent value is silence (counted, not failed).
+  if (intent.formula) {
+    const observed = (el.state.value ?? '').trim();
+    const want = intent.formula.trim();
+    if (!observed) {
+      unobservable.push('formula');
+    } else if (!(observed === want || observed.includes(want))) {
+      return {
+        verdict: 'AMBIGUOUS',
+        reason:
+          `element "${intent.label}" has value "${observed}" but intent formula ` +
+          `is "${want}"`,
+        suspected_trap: 'formula not applied, or applied to the wrong control',
+      };
+    }
   }
 
   return {

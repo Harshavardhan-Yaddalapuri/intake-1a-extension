@@ -36,7 +36,8 @@ import type {
   ContractOpId,
   RecipeStep,
 } from '../shared/contract';
-import { idempotencyKey, CANONICAL_TYPES } from '../shared/contract';
+import { idempotencyKey, stepIdempotencyKey, CANONICAL_TYPES } from '../shared/contract';
+import { FieldPropertyWrites } from './field-properties';
 import type {
   EscalationItem,
   RunProgress,
@@ -45,7 +46,7 @@ import type {
   HumanDecision,
 } from '../shared/messages';
 import type { IntentRecord, VerdictResult } from '../verify/verify';
-import { compareIntent, checkFirst } from '../verify/verify';
+import { compareIntent, checkFirst, resolveByName } from '../verify/verify';
 import {
   type RunState,
   type ItemRecord,
@@ -214,10 +215,11 @@ export class Orchestrator {
       }
     }
 
-    // Build run state with all idempotency keys.
+    // Build run state with all step keys. Skip-logic steps get a distinct key
+    // so they still run after the field body is verified (see stepIdempotencyKey).
     const keys: string[] = [];
     for (const item of this.linearItems) {
-      const key = idempotencyKey(item.visit_id, item.form_id, item.field_id);
+      const key = stepIdempotencyKey(item);
       if (!keys.includes(key)) {
         keys.push(key);
       }
@@ -513,7 +515,7 @@ export class Orchestrator {
     let invalidated = false;
 
     for (const item of this.linearItems) {
-      const key = idempotencyKey(item.visit_id, item.form_id, item.field_id);
+      const key = stepIdempotencyKey(item);
       const record = this.runState.items[key];
       if (!record || record.state === 'pending') continue;
 
@@ -569,7 +571,7 @@ export class Orchestrator {
       }
 
       const item = this.linearItems[i];
-      const itemKey = idempotencyKey(item.visit_id, item.form_id, item.field_id);
+      const itemKey = stepIdempotencyKey(item);
       const record = this.runState.items[itemKey];
 
       // Skip already-verified items (idempotency).
@@ -705,6 +707,7 @@ export class Orchestrator {
       coded_pairs: field.options,
       range_units: field.range,
       skip_rules: field.skip_logic ? [field.skip_logic] : undefined,
+      formula: field.formula,
     };
 
     // Determine what to do based on the micro-step kind.
@@ -728,6 +731,9 @@ export class Orchestrator {
         break;
       case 'set_coded_values':
         await this.executeFieldSetCodedValues(item, itemKey, field);
+        break;
+      case 'set_formula':
+        await this.executeFieldSetFormula(item, itemKey, field);
         break;
       case 'set_required':
         await this.executeFieldSetRequired(item, itemKey, field, intent);
@@ -1271,44 +1277,225 @@ export class Orchestrator {
     }
   }
 
+  private async executeFieldSetFormula(
+    item: LinearItem,
+    itemKey: string,
+    field: IrField,
+  ): Promise<void> {
+    if (!field.formula) {
+      await this.markVerified(itemKey, {
+        rung: 0,
+        evidence: ['no formula in IR; nothing to write'],
+        reason: 'set_formula skipped (empty)',
+      });
+      return;
+    }
+
+    const { observation } = await this.driver.perceive();
+    const input = FieldPropertyWrites.findFormulaInput(observation);
+    if (!input) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason: 'no formula/expression input found in the property editor',
+        suspectedTrap:
+          'calculated fields expose a formula editor only when that type is ' +
+          'selected; the type may not have settled, or this platform names it oddly',
+        evidence: ['field.set_formula: formula input absent'],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
+    }
+
+    await this.driver.setValue(input.handle, field.formula);
+    await this.sleep(200);
+
+    const { observation: after } = await this.driver.perceiveAfterSettle(200);
+    const check = FieldPropertyWrites.formulaLooksSet(after, field.formula);
+    if (check.ok) {
+      await this.markVerified(itemKey, {
+        rung: 0,
+        evidence: [check.evidence],
+        reason: check.evidence,
+      });
+      return;
+    }
+
+    await this.escalateItem(itemKey, 'verifying', {
+      key: itemKey,
+      fieldLabel: field.label,
+      formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+      visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+      canonicalType: field.canonical_type,
+      reason: check.evidence,
+      suspectedTrap: 'formula write did not stick on read-back',
+      evidence: [check.evidence],
+      phase: 'verifying',
+    }, /* blocking */ false);
+  }
+
   private async executeFieldSetSkipLogic(
     item: LinearItem,
     itemKey: string,
     field: IrField,
   ): Promise<void> {
-    if (!field.skip_logic) return;
+    if (!field.skip_logic) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason: 'set_skip_logic planned but IR has no skip_logic on this field',
+        evidence: ['missing field.skip_logic'],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
+    }
+
+    // Form-end: the property editor may still be showing a different field.
+    // Open this field first so Visibility / When / Equals controls exist.
+    if (!(await this.selectFieldForProperties(field))) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason: `could not select field "${field.label}" on the canvas to edit skip logic`,
+        evidence: ['selectFieldForProperties failed'],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
+    }
 
     const { observation } = await this.driver.perceive();
-
-    // Find visibility/conditional selector.
-    const visCandidates = findByRole(observation, 'combobox', { contains: 'visib' })
-      .concat(findByRole(observation, 'listbox', { contains: 'visib' }))
-      .concat(findByRole(observation, 'combobox', { contains: 'conditional' }));
-
-    if (visCandidates.length > 0) {
-      // Select "Conditional" or equivalent.
-      await this.driver.selectOption(visCandidates[0].el.handle, 'Conditional');
-      await this.sleep(300);
-
-      // Re-observe for the when/value inputs.
-      const { observation: freshObs } = await this.driver.perceive();
-
-      // Find the "when" field selector.
-      const whenSelects = findByRole(freshObs, 'combobox', { contains: 'when' })
-        .concat(findByRole(freshObs, 'listbox', { contains: 'when' }));
-      if (whenSelects.length > 0) {
-        await this.driver.selectOption(whenSelects[0].el.handle, field.skip_logic.when_field_label);
-        await this.sleep(200);
-      }
-
-      // Find the value input.
-      const { observation: freshObs2 } = await this.driver.perceive();
-      const valueInputs = findByRole(freshObs2, 'textbox', { contains: 'value' })
-        .concat(findByRole(freshObs2, 'textbox', { contains: 'equal' }));
-      if (valueInputs.length > 0) {
-        await this.driver.setValue(valueInputs[0].el.handle, field.skip_logic.equals_value);
-      }
+    const mode = FieldPropertyWrites.findVisibilityModeControl(observation);
+    if (!mode) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason: 'no visibility/display-mode control found in the property editor',
+        suspectedTrap:
+          'skip logic is unbindable on this surface, or the field was not selected',
+        evidence: ['visibility mode control absent'],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
     }
+
+    const conditionalOption = FieldPropertyWrites.pickConditionalModeOption(mode.options);
+    if (!conditionalOption) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason:
+          `visibility control "${mode.name}" has no option that looks conditional ` +
+          `(options: ${mode.options.join(' | ') || 'none'})`,
+        evidence: [`options=[${mode.options.join(', ')}]`],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
+    }
+
+    // Select the platform's OWN option label (e.g. "Visible When…"), never a
+    // hardcoded "Conditional" string that Mock A does not offer.
+    const modeRes = await this.driver.selectOption(mode.handle, conditionalOption);
+    if (!modeRes.ok) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason: `failed to select visibility option "${conditionalOption}": ${modeRes.error ?? 'unknown'}`,
+        evidence: [modeRes.error ?? 'selectOption failed'],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
+    }
+    await this.sleep(300);
+
+    const { observation: afterMode } = await this.driver.perceive();
+    const whenSelect = FieldPropertyWrites.findWhenFieldControl(afterMode);
+    if (whenSelect) {
+      const whenRes = await this.driver.selectOption(
+        whenSelect.handle,
+        field.skip_logic.when_field_label,
+      );
+      if (!whenRes.ok) {
+        await this.escalateItem(itemKey, 'acting', {
+          key: itemKey,
+          fieldLabel: field.label,
+          formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+          visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+          canonicalType: field.canonical_type,
+          reason:
+            `failed to select controlling field "${field.skip_logic.when_field_label}" ` +
+            `in when-control: ${whenRes.error ?? 'unknown'}`,
+          evidence: [whenRes.error ?? 'selectOption failed'],
+          phase: 'acting',
+        }, /* blocking */ false);
+        return;
+      }
+      await this.sleep(200);
+    }
+
+    const { observation: afterWhen } = await this.driver.perceive();
+    const valueInput = FieldPropertyWrites.findEqualsValueInput(afterWhen);
+    if (valueInput) {
+      await this.driver.setValue(valueInput.handle, field.skip_logic.equals_value);
+      await this.sleep(150);
+    }
+
+    const { observation: finalObs } = await this.driver.perceiveAfterSettle(250);
+    const check = FieldPropertyWrites.skipLogicLooksSet(
+      finalObs,
+      field.skip_logic.equals_value,
+    );
+    if (check.ok) {
+      await this.markVerified(itemKey, {
+        rung: 0,
+        evidence: [check.evidence, `mode option="${conditionalOption}"`],
+        reason: check.evidence,
+      });
+      return;
+    }
+
+    await this.escalateItem(itemKey, 'verifying', {
+      key: itemKey,
+      fieldLabel: field.label,
+      formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+      visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+      canonicalType: field.canonical_type,
+      reason: check.evidence,
+      suspectedTrap: 'skip logic write did not read back',
+      evidence: [check.evidence, `tried mode option="${conditionalOption}"`],
+      phase: 'verifying',
+    }, /* blocking */ false);
+  }
+
+  /**
+   * Click the canvas control for a field so its property editor is showing.
+   * Required before form-end skip-logic writes: the options panel only edits
+   * the currently selected element.
+   */
+  private async selectFieldForProperties(field: IrField): Promise<boolean> {
+    const { observation } = await this.driver.perceive();
+    const match = resolveByName(observation, field.label);
+    if (!match || match === 'ambiguous') return false;
+    await this.driver.click(match.el.handle);
+    await this.sleep(250);
+    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -1658,7 +1845,7 @@ export class Orchestrator {
     // on the surfaces where those controls actually live.
     const BUILDER_OWNED: readonly ContractOpId[] = [
       'field.add', 'field.set_label', 'field.set_required', 'field.set_range',
-      'field.set_coded_values', 'field.set_skip_logic',
+      'field.set_coded_values', 'field.set_skip_logic', 'field.set_formula',
       'ctx.commit', 'ctx.is_committed', 'ctx.discard',
       'form.list_fields', 'field_palette.open',
     ];
@@ -2140,7 +2327,7 @@ export class Orchestrator {
   /** Best-effort provenance for an escalation, which may not have a LinearItem. */
   private sourceOfKey(itemKey: string, e: Omit<EscalationItem, 'blocking'>): IrSource {
     const item = this.linearItems.find(
-      (i) => idempotencyKey(i.visit_id, i.form_id, i.field_id) === itemKey,
+      (i) => stepIdempotencyKey(i) === itemKey,
     );
     if (item) return this.sourceOf(item);
     return {

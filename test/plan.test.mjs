@@ -194,6 +194,23 @@ test('micro-order: no range step when field has no range', () => {
   assert.deepEqual(microOrder(f), ['add', 'set_label', 'type_refinement', 'set_required']);
 });
 
+test('micro-order: calculated fields with a formula get set_formula before set_required', () => {
+  const ir = parseIRJson(JSON.stringify(syntheticIR([
+    field('BMI', 'calculated', { formula: 'Weight / (Height / 100) ^ 2' }),
+  ])));
+  const f = ir.visits[0].forms[0].fields[0];
+  assert.deepEqual(microOrder(f), [
+    'add', 'set_label', 'type_refinement', 'set_formula', 'set_required',
+  ]);
+  assert.ok(f.formula);
+});
+
+test('micro-order: calculated fields without a formula get no set_formula step', () => {
+  const ir = parseIRJson(JSON.stringify(syntheticIR([field('X', 'calculated')])));
+  const f = ir.visits[0].forms[0].fields[0];
+  assert.ok(!microOrder(f).includes('set_formula'));
+});
+
 // ---------------------------------------------------------------------------
 // Linearization.
 // ---------------------------------------------------------------------------
@@ -239,8 +256,9 @@ test('contract includes form.list_fields', () => {
   );
 });
 
-test('contract has 18 operations', () => {
-  assert.equal(CONTRACT_OPS.length, 18);
+test('contract has 19 operations', () => {
+  assert.equal(CONTRACT_OPS.length, 19);
+  assert.ok(CONTRACT_OPS.includes('field.set_formula'));
 });
 
 test('every linear item carries its canonical type and human-readable names', () => {

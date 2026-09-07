@@ -37,6 +37,9 @@ export type HintKey =
   | 'property_editor'
   | 'decimals'
   | 'formula'
+  | 'visibility'
+  | 'skip_when'
+  | 'skip_value'
   | 'date_options'
   | 'template'
   | 'window_start'
@@ -67,6 +70,9 @@ export const LEXICAL_HINTS: Record<HintKey, readonly string[]> = {
   ],
   decimals: ['decimal', 'precision', 'places'],
   formula: ['formula', 'expression', 'calculation', 'derived'],
+  visibility: ['visibility', 'visible', 'show', 'hide', 'display', 'conditional'],
+  skip_when: ['when', 'trigger', 'controlling', 'element', 'node', 'field'],
+  skip_value: ['equal', 'equals', 'value', 'condition'],
   date_options: ['allow past', 'allow future', 'picker options', 'date range'],
   template: ['template', 'banked', 'bank it', 'library', 'reusable'],
   window_start: ['start', 'from', 'begin', 'day 1', 'lower', 'earliest', 'window'],
