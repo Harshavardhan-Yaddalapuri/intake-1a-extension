@@ -71,8 +71,12 @@ export const LEXICAL_HINTS: Record<HintKey, readonly string[]> = {
   decimals: ['decimal', 'precision', 'places'],
   formula: ['formula', 'expression', 'calculation', 'derived'],
   visibility: ['visibility', 'visible', 'show', 'hide', 'display', 'conditional'],
-  skip_when: ['when', 'trigger', 'controlling', 'element', 'node', 'field'],
-  skip_value: ['equal', 'equals', 'value', 'condition'],
+  // 'element' omitted on purpose: it matches Mock A's 'Element Type' select
+  // and tied with 'When Element', so skip writes bound the type picker (0/13).
+  skip_when: ['when', 'trigger', 'controlling', 'node', 'field'],
+  // bare 'value' omitted: it matches 'Paste Values' and tied with 'Equals Value',
+  // so equals writes landed in the coded-values paste box.
+  skip_value: ['equal', 'equals', 'condition'],
   date_options: ['allow past', 'allow future', 'picker options', 'date range'],
   template: ['template', 'banked', 'bank it', 'library', 'reusable'],
   window_start: ['start', 'from', 'begin', 'day 1', 'lower', 'earliest', 'window'],

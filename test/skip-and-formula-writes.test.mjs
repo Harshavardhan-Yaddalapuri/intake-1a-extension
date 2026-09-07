@@ -302,3 +302,110 @@ test('skipLogicLooksSet passes when when value is an opaque element id', () => {
   const check = FieldPropertyWrites.skipLogicLooksSet(o, 'Yes', 'Controller');
   assert.equal(check.ok, true, check.evidence);
 });
+
+
+// ---------------------------------------------------------------------------
+// Live Mock A regression: property panel also has Element Type + Paste Values.
+// Weak priors ('element', 'value') previously tied those decoys with the real
+// when/equals controls, so skip writes never bound whenElementId (0/13).
+// ---------------------------------------------------------------------------
+
+const fullOptionsPanel = ({
+  visibilityMode = 'when',
+  whenOptions = ['Any Exclusionary Condition Present', 'Other'],
+  whenSelected = '',
+  equalsValue = '',
+} = {}) => {
+  const modeOpts =
+    visibilityMode === 'when'
+      ? `<option value="always">Visible</option><option value="when" selected>Visible When…</option>`
+      : `<option value="always" selected>Visible</option><option value="when">Visible When…</option>`;
+  const whenBlock =
+    visibilityMode === 'when'
+      ? `<div class="row"><label for="opt-visibility-when">When Element</label>
+           <select id="opt-visibility-when">
+             <option value="">— choose element —</option>
+             ${whenOptions
+               .map(
+                 (l) =>
+                   `<option value="el_${l.replace(/\s+/g, '_')}"${l === whenSelected ? ' selected' : ''}>${l}</option>`,
+               )
+               .join('')}
+           </select></div>
+         <div class="row"><label for="opt-visibility-value">Equals Value</label>
+           <input type="text" id="opt-visibility-value" value="${equalsValue}"></div>`
+      : '';
+  return `<aside class="options"><h3>Options</h3>
+<div class="row"><label for="opt-label">Label</label>
+  <input type="text" id="opt-label" value="Exclusionary Conditions"></div>
+<div class="row"><label for="opt-type">Element Type</label>
+  <select id="opt-type">
+    <option>Calculated Field</option>
+    <option selected>Check List</option>
+    <option>Checkbox</option>
+    <option>Date</option>
+    <option>Date/Time</option>
+    <option>Dropdown</option>
+    <option>Multi-line Textbox</option>
+    <option>Number (Decimal)</option>
+    <option>Number (Whole)</option>
+    <option>Radio Buttons</option>
+    <option>Single Line Textbox</option>
+    <option>Time</option>
+    <option>Yes/No Toggle</option>
+  </select></div>
+<fieldset class="values"><legend>Values</legend>
+  <div class="row"><label for="value-paste">Paste Values (replaces list)</label>
+    <textarea id="value-paste" rows="3"></textarea></div>
+</fieldset>
+<fieldset><legend>Element Visibility</legend>
+  <div class="row"><label for="opt-visibility">Visibility</label>
+    <select id="opt-visibility">${modeOpts}</select></div>
+  ${whenBlock}
+</fieldset></aside>`;
+};
+
+test('findWhenFieldControl prefers When Element over Element Type decoy', () => {
+  const o = observe(
+    new JSDOM(
+      `<!doctype html><html><body>${fullOptionsPanel({ whenSelected: '' })}</body></html>`,
+    ).window.document,
+  );
+  const when = FieldPropertyWrites.findWhenFieldControl(
+    o,
+    'Any Exclusionary Condition Present',
+  );
+  assert.ok(when, 'when-element select present');
+  assert.equal(when.name, 'When Element');
+  assert.ok(when.options.includes('Any Exclusionary Condition Present'));
+  assert.notEqual(when.name, 'Element Type');
+});
+
+test('findEqualsValueInput prefers Equals Value over Paste Values decoy', () => {
+  const o = observe(
+    new JSDOM(
+      `<!doctype html><html><body>${fullOptionsPanel({ equalsValue: '' })}</body></html>`,
+    ).window.document,
+  );
+  const value = FieldPropertyWrites.findEqualsValueInput(o);
+  assert.ok(value, 'equals-value input present');
+  assert.equal(value.name, 'Equals Value');
+  assert.equal(/paste/i.test(value.name), false);
+});
+
+test('skipLogicLooksSet ok on full Mock A options panel with opaque when id', () => {
+  const o = observe(
+    new JSDOM(
+      `<!doctype html><html><body>${fullOptionsPanel({
+        whenSelected: 'Any Exclusionary Condition Present',
+        equalsValue: 'Yes',
+      })}</body></html>`,
+    ).window.document,
+  );
+  const check = FieldPropertyWrites.skipLogicLooksSet(
+    o,
+    'Yes',
+    'Any Exclusionary Condition Present',
+  );
+  assert.equal(check.ok, true, check.evidence);
+});

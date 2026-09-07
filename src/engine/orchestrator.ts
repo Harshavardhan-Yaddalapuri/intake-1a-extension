@@ -1472,7 +1472,10 @@ export class Orchestrator {
     await this.sleep(300);
 
     const { observation: afterMode } = await this.driver.perceive();
-    const whenSelect = FieldPropertyWrites.findWhenFieldControl(afterMode);
+    const whenSelect = FieldPropertyWrites.findWhenFieldControl(
+      afterMode,
+      field.skip_logic.when_field_label,
+    );
     if (!whenSelect) {
       await this.escalateItem(itemKey, 'acting', {
         key: itemKey,

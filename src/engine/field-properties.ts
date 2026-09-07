@@ -70,7 +70,10 @@ export class FieldPropertyWrites {
    * The "when / trigger field" select that appears after conditional mode is
    * enabled. Demotes the visibility mode control so we do not re-pick it.
    */
-  static findWhenFieldControl(obs: Observation): ObservationElement | null {
+  static findWhenFieldControl(
+    obs: Observation,
+    expectedWhenLabel?: string,
+  ): ObservationElement | null {
     const pool = enumerateByRoles(obs, ['combobox', 'listbox']);
     const ranked = rankCandidates(pool, {
       hint: 'skip_when',
@@ -79,13 +82,22 @@ export class FieldPropertyWrites {
     // Prefer a select whose options look like sibling field labels — never the
     // visibility mode control itself (Visible / Visible When…), even when demote
     // failed to push it last.
+    //
+    // When the IR controlling label is known, prefer a select that actually
+    // offers it. That structurally beats 'Element Type' (and any other property
+    // combobox) which can otherwise tie on weak lexical priors.
+    const candidates: ObservationElement[] = [];
     for (const r of ranked) {
       const opts = r.el.options ?? [];
       if (opts.length < 2) continue;
       if (FieldPropertyWrites.looksLikeVisibilityModeOptions(opts)) continue;
-      return r.el;
+      candidates.push(r.el);
     }
-    return null;
+    if (expectedWhenLabel) {
+      const offering = candidates.find((el) => el.options.includes(expectedWhenLabel));
+      if (offering) return offering;
+    }
+    return candidates[0] ?? null;
   }
 
   /** True when option labels look like a visibility mode enum, not field names. */
@@ -106,7 +118,14 @@ export class FieldPropertyWrites {
   /** The equals/value textbox for the skip rule. */
   static findEqualsValueInput(obs: Observation): ObservationElement | null {
     const pool = enumerateByRoles(obs, ['textbox', 'searchbox']);
-    return rankCandidates(pool, { hint: 'skip_value' })[0]?.el ?? null;
+    const ranked = rankCandidates(pool, { hint: 'skip_value' });
+    // Prefer single-line inputs over paste/bulk textareas when scores tie.
+    for (const r of ranked) {
+      const tag = (r.el.tagName ?? '').toLowerCase();
+      if (tag === 'textarea') continue;
+      return r.el;
+    }
+    return ranked[0]?.el ?? null;
   }
 
   /** The formula / expression textbox on a calculated field. */
@@ -136,7 +155,7 @@ export class FieldPropertyWrites {
         modeValue.includes('when') ||
         CONDITIONAL_OPTION_WORDS.some((w) => modeValue.includes(w)));
 
-    const when = FieldPropertyWrites.findWhenFieldControl(obs);
+    const when = FieldPropertyWrites.findWhenFieldControl(obs, expectedWhenLabel);
     const whenOk = FieldPropertyWrites.whenFieldLooksSelected(when, expectedWhenLabel);
 
     const value = FieldPropertyWrites.findEqualsValueInput(obs);
