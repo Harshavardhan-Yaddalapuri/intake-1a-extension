@@ -76,12 +76,31 @@ export class FieldPropertyWrites {
       hint: 'skip_when',
       demote: ['visibility'],
     });
-    // Prefer a select whose options look like sibling field labels (more than
-    // the two-ish mode options on the visibility control).
+    // Prefer a select whose options look like sibling field labels — never the
+    // visibility mode control itself (Visible / Visible When…), even when demote
+    // failed to push it last.
     for (const r of ranked) {
-      if ((r.el.options?.length ?? 0) >= 2) return r.el;
+      const opts = r.el.options ?? [];
+      if (opts.length < 2) continue;
+      if (FieldPropertyWrites.looksLikeVisibilityModeOptions(opts)) continue;
+      return r.el;
     }
-    return ranked[0]?.el ?? null;
+    return null;
+  }
+
+  /** True when option labels look like a visibility mode enum, not field names. */
+  static looksLikeVisibilityModeOptions(options: readonly string[]): boolean {
+    if (options.length === 0 || options.length > 4) return false;
+    let conditional = 0;
+    let alwaysish = 0;
+    for (const opt of options) {
+      const n = opt.toLowerCase();
+      if (CONDITIONAL_OPTION_WORDS.some((w) => n.includes(w))) conditional += 1;
+      if (ALWAYS_OPTION_WORDS.some((w) => n.includes(w)) && !CONDITIONAL_OPTION_WORDS.some((w) => n.includes(w))) {
+        alwaysish += 1;
+      }
+    }
+    return conditional >= 1 && alwaysish >= 1;
   }
 
   /** The equals/value textbox for the skip rule. */
@@ -104,6 +123,7 @@ export class FieldPropertyWrites {
   static skipLogicLooksSet(
     obs: Observation,
     expectedEquals: string,
+    expectedWhenLabel?: string,
   ): { ok: boolean; evidence: string } {
     const mode = FieldPropertyWrites.findVisibilityModeControl(obs);
     const conditional = mode
@@ -117,24 +137,23 @@ export class FieldPropertyWrites {
         CONDITIONAL_OPTION_WORDS.some((w) => modeValue.includes(w)));
 
     const when = FieldPropertyWrites.findWhenFieldControl(obs);
+    const whenOk = FieldPropertyWrites.whenFieldLooksSelected(when, expectedWhenLabel);
+
     const value = FieldPropertyWrites.findEqualsValueInput(obs);
     const valueOk =
       !!value &&
       (value.state.value ?? '').trim() === expectedEquals.trim();
 
-    if (modeOk && valueOk) {
+    // Mock A __readState only emits skipLogic when mode==='when' AND
+    // whenElementId is set. mode+equals without a controlling field still
+    // serialises as null — so verify must require the when control too.
+    if (modeOk && whenOk && valueOk) {
       return {
         ok: true,
         evidence:
-          `visibility mode is conditional` +
-          (when ? `; when-control present` : '') +
+          `visibility mode is conditional; when-control selected` +
+          (expectedWhenLabel ? ` ("${expectedWhenLabel}")` : '') +
           `; equals value read back as "${value!.state.value}"`,
-      };
-    }
-    if (valueOk && when) {
-      return {
-        ok: true,
-        evidence: `when-control present and equals value read back as "${value!.state.value}"`,
       };
     }
     return {
@@ -142,8 +161,31 @@ export class FieldPropertyWrites {
       evidence:
         `skip logic read-back incomplete` +
         (mode ? `; mode value="${mode.state.value ?? ''}"` : '; no visibility control') +
+        (when
+          ? `; when value="${when.state.value ?? ''}"`
+          : '; no when-element control') +
         (value ? `; equals="${value.state.value ?? ''}"` : '; no equals input'),
     };
+  }
+
+  /**
+   * True when the when-element select has a real choice selected (not the
+   * empty / "choose element" placeholder). Perceive exposes <select>.value
+   * (often an opaque element id on Mock A), so we cannot always assert the
+   * IR label from observation alone — a non-empty non-placeholder value is
+   * the durable signal that whenElementId was set.
+   */
+  static whenFieldLooksSelected(
+    when: ObservationElement | null,
+    expectedWhenLabel?: string,
+  ): boolean {
+    if (!when) return false;
+    const raw = (when.state.value ?? '').trim();
+    if (!raw || /^[—–-]/.test(raw) || /choose/i.test(raw)) return false;
+    if (!expectedWhenLabel) return true;
+    if (raw === expectedWhenLabel) return true;
+    // Opaque id selected: confirm the IR label is at least offered.
+    return when.options.includes(expectedWhenLabel);
   }
 
   /** True when the formula input's value matches the intended expression. */

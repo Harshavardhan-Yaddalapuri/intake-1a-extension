@@ -582,11 +582,19 @@ export class Orchestrator {
         continue;
       }
 
-      // Skip escalated items (human will resolve later).
+      // Skip escalated items (human will resolve later) — except skip-logic /
+      // formula property writes. Reconcile does not observe those properties, and
+      // a prior escalate (e.g. wrong visibility option label) must not permanently
+      // suppress retries after a code fix on an otherwise complete study.
       if (record && record.state === 'escalated') {
-        this.runState.cursor = i + 1;
-        this.emitProgress(i);
-        continue;
+        if (item.kind === 'set_skip_logic' || item.kind === 'set_formula') {
+          record.state = 'pending';
+          record.last_verdict = undefined;
+        } else {
+          this.runState.cursor = i + 1;
+          this.emitProgress(i);
+          continue;
+        }
       }
 
       // If form context is changing, commit the current form first!
@@ -666,7 +674,15 @@ export class Orchestrator {
     const reconciled = this.formReconcile.get(item.form_id);
     const decision = reconciled?.decisions.find((d) => d.field_id === item.field_id);
 
-    if (decision?.action === 'adopt') {
+    // Reconcile adopts on label/type/required/range/codes only — it never looks
+    // at skip_logic or formula. Adopting those micro-steps marks them verified
+    // without writing, which is exactly how live Mock A stayed at 0/13 skip
+    // rules after structure+formulas were already present.
+    if (
+      decision?.action === 'adopt' &&
+      item.kind !== 'set_skip_logic' &&
+      item.kind !== 'set_formula'
+    ) {
       const record = this.runState.items[itemKey];
       if (record) {
         record.state = 'verified';
@@ -1457,40 +1473,67 @@ export class Orchestrator {
 
     const { observation: afterMode } = await this.driver.perceive();
     const whenSelect = FieldPropertyWrites.findWhenFieldControl(afterMode);
-    if (whenSelect) {
-      const whenRes = await this.driver.selectOption(
-        whenSelect.handle,
-        field.skip_logic.when_field_label,
-      );
-      if (!whenRes.ok) {
-        await this.escalateItem(itemKey, 'acting', {
-          key: itemKey,
-          fieldLabel: field.label,
-          formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
-          visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
-          canonicalType: field.canonical_type,
-          reason:
-            `failed to select controlling field "${field.skip_logic.when_field_label}" ` +
-            `in when-control: ${whenRes.error ?? 'unknown'}`,
-          evidence: [whenRes.error ?? 'selectOption failed'],
-          phase: 'acting',
-        }, /* blocking */ false);
-        return;
-      }
-      await this.sleep(200);
+    if (!whenSelect) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason:
+          'visibility is conditional but no when-element select appeared — ' +
+          'Mock A only persists skipLogic when whenElementId is set',
+        evidence: ['when-element control absent after selecting conditional mode'],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
     }
+
+    const whenRes = await this.driver.selectOption(
+      whenSelect.handle,
+      field.skip_logic.when_field_label,
+    );
+    if (!whenRes.ok) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason:
+          `failed to select controlling field "${field.skip_logic.when_field_label}" ` +
+          `in when-control: ${whenRes.error ?? 'unknown'}`,
+        evidence: [whenRes.error ?? 'selectOption failed'],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
+    }
+    await this.sleep(200);
 
     const { observation: afterWhen } = await this.driver.perceive();
     const valueInput = FieldPropertyWrites.findEqualsValueInput(afterWhen);
-    if (valueInput) {
-      await this.driver.setValue(valueInput.handle, field.skip_logic.equals_value);
-      await this.sleep(150);
+    if (!valueInput) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason: 'no equals-value input found after setting when-element',
+        evidence: ['equals-value input absent'],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
     }
+
+    await this.driver.setValue(valueInput.handle, field.skip_logic.equals_value);
+    await this.sleep(150);
 
     const { observation: finalObs } = await this.driver.perceiveAfterSettle(250);
     const check = FieldPropertyWrites.skipLogicLooksSet(
       finalObs,
       field.skip_logic.equals_value,
+      field.skip_logic.when_field_label,
     );
     if (check.ok) {
       await this.markVerified(itemKey, {

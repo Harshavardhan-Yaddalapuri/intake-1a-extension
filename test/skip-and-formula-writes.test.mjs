@@ -2,13 +2,17 @@
  * Skip-logic and formula write paths.
  *
  * Live Mock A showed 0/13 skip rules and 0/7 formulas despite structure being
- * otherwise correct. Two independent defects:
+ * otherwise correct. Defects found across iterations:
  *
  *  1. FORMULAS were never planned (no set_formula micro-step / contract op).
  *  2. SKIP LOGIC was planned at form end but (a) shared the field idempotency
  *     key so verified fields skipped the step, and (b) hardcoded selectOption
- *    (..., 'Conditional') which Mock A does not offer — options are
+ *     (..., 'Conditional') which Mock A does not offer — options are
  *     "Visible" / "Visible When…".
+ *  3. Reconcile adopts on structure only; adopt short-circuited set_skip_logic
+ *     on re-runs, and prior escalated skip steps were never retried. Also,
+ *     verify could pass on mode+equals without a whenElementId — but Mock A
+ *     __readState only emits skipLogic when whenElementId is set.
  *
  * Markup transcribed from esource-mock options panel (Visibility + Formula).
  */
@@ -227,4 +231,74 @@ test('swapped-control Expression label still ranks as the formula input', () => 
   assert.ok(input);
   assert.equal(input.name.toLowerCase(), 'expression');
   assert.equal(FieldPropertyWrites.formulaLooksSet(o, 'a + b').ok, true);
+});
+
+test('findWhenFieldControl never returns the visibility mode select', () => {
+  const o = obsOf({
+    visibilityMode: 'when',
+    whenOptions: ['Controller', 'Other'],
+    whenSelected: 'Controller',
+    equalsValue: 'Yes',
+  });
+  const when = FieldPropertyWrites.findWhenFieldControl(o);
+  assert.ok(when);
+  assert.equal(when.name, 'When Element');
+  assert.equal(
+    FieldPropertyWrites.looksLikeVisibilityModeOptions(when.options),
+    false,
+  );
+  const mode = FieldPropertyWrites.findVisibilityModeControl(o);
+  assert.ok(mode);
+  assert.equal(
+    FieldPropertyWrites.looksLikeVisibilityModeOptions(mode.options),
+    true,
+  );
+});
+
+test('skipLogicLooksSet fails when when-element is still the placeholder', () => {
+  // Mode is conditional and equals is filled, but whenElementId is empty —
+  // Mock A serialises skipLogic as null in that case.
+  const html = `<aside class="options">
+<fieldset><legend>Element Visibility</legend>
+  <div class="row"><label for="opt-visibility">Visibility</label>
+    <select id="opt-visibility">
+      <option value="always">Visible</option>
+      <option value="when" selected>Visible When…</option>
+    </select></div>
+  <div class="row"><label for="opt-visibility-when">When Element</label>
+    <select id="opt-visibility-when">
+      <option value="" selected>— choose element —</option>
+      <option value="a">Controller</option>
+    </select></div>
+  <div class="row"><label for="opt-visibility-value">Equals Value</label>
+    <input type="text" id="opt-visibility-value" value="Yes"></div>
+</fieldset></aside>`;
+  const o = observe(
+    new JSDOM(`<!doctype html><html><body>${html}</body></html>`).window.document,
+  );
+  const check = FieldPropertyWrites.skipLogicLooksSet(o, 'Yes', 'Controller');
+  assert.equal(check.ok, false, check.evidence);
+});
+
+test('skipLogicLooksSet passes when when value is an opaque element id', () => {
+  const html = `<aside class="options">
+<fieldset><legend>Element Visibility</legend>
+  <div class="row"><label for="opt-visibility">Visibility</label>
+    <select id="opt-visibility">
+      <option value="always">Visible</option>
+      <option value="when" selected>Visible When…</option>
+    </select></div>
+  <div class="row"><label for="opt-visibility-when">When Element</label>
+    <select id="opt-visibility-when">
+      <option value="">— choose element —</option>
+      <option value="el_42" selected>Controller</option>
+    </select></div>
+  <div class="row"><label for="opt-visibility-value">Equals Value</label>
+    <input type="text" id="opt-visibility-value" value="Yes"></div>
+</fieldset></aside>`;
+  const o = observe(
+    new JSDOM(`<!doctype html><html><body>${html}</body></html>`).window.document,
+  );
+  const check = FieldPropertyWrites.skipLogicLooksSet(o, 'Yes', 'Controller');
+  assert.equal(check.ok, true, check.evidence);
 });
