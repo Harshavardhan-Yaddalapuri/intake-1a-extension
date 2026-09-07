@@ -19,6 +19,7 @@ export function elem(role, name, extra = {}) {
     options: extra.options ?? [],
     tagName: extra.tagName ?? 'button',
     inputType: extra.inputType,
+    groupText: extra.groupText,
   };
 }
 

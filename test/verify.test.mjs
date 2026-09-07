@@ -258,12 +258,17 @@ test('a matching observed range is VERIFIED', () => {
   assert.equal(v.verdict, 'VERIFIED', v.reason);
 });
 
-test('a numeric control with NO observed range is AMBIGUOUS, not VERIFIED', () => {
+test('a numeric control that states NO range is counted, not reported', () => {
+  // Was AMBIGUOUS "the platform may have discarded the range". It does not
+  // discard it: this designer keeps min/max in its own state and renders a
+  // preview control carrying neither, so all 59 bounded fields in the study
+  // reported a range that had in fact been applied. Absence of evidence is
+  // not evidence of loss. The run still says so once, via `unobservable`.
   resetSeq();
   const o = mkObs([elem('spinbutton', 'Heart Rate (bpm)', { state: {} })]);
   const v = compareIntent(o, rangeIntent);
-  assert.equal(v.verdict, 'AMBIGUOUS', 'this is the silent-discard trap');
-  assert.match(v.suspected_trap ?? '', /discard|type change/i);
+  assert.equal(v.verdict, 'VERIFIED', v.reason);
+  assert.deepEqual(v.unobservable, ['range bounds']);
 });
 
 test('a wrong observed range is AMBIGUOUS', () => {
@@ -274,12 +279,25 @@ test('a wrong observed range is AMBIGUOUS', () => {
   assert.match(v.reason, /30|200/);
 });
 
-test('missing units are AMBIGUOUS, not FAILED', () => {
+test('a unit stated nowhere observable is counted, not reported', () => {
   resetSeq();
   const o = mkObs([elem('spinbutton', 'Heart Rate', { state: { range: { min: 30, max: 200 } } })]);
   const v = compareIntent(o, rangeIntent);
-  assert.equal(v.verdict, 'AMBIGUOUS');
-  assert.match(v.reason, /unit/i);
+  assert.equal(v.verdict, 'VERIFIED', v.reason);
+  assert.deepEqual(v.unobservable, ['units (bpm)']);
+});
+
+test('units stated beside the control satisfy the unit check', () => {
+  // Units are not an ARIA concept, so a platform renders them where it likes.
+  // This one puts them in a span next to the input, which PERCEIVE reports as
+  // the group the control sits in.
+  resetSeq();
+  const o = mkObs([elem('spinbutton', 'Heart Rate', {
+    state: { range: { min: 30, max: 200 } }, groupText: 'bpm',
+  })]);
+  const v = compareIntent(o, rangeIntent);
+  assert.equal(v.verdict, 'VERIFIED', v.reason);
+  assert.equal(v.unobservable, undefined, 'nothing went unchecked');
 });
 
 test('units found in the accessible name satisfy the unit check', () => {

@@ -175,6 +175,10 @@ export class Orchestrator {
   private deepReconcileAvailable = false;
   /** Non-blocking escalations, reviewed in one sitting at the end. */
   private parked: EscalationItem[] = [];
+  /** How many fields carried an attribute this platform states nowhere, by
+   *  attribute. Entered, but with no surface to read it back from -- said once
+   *  for the run rather than parked as a finding on every field that has one. */
+  private unobservable: Map<string, number> = new Map();
   /** One decision per group settles every item sharing that group key. */
   private groupDecisions: Map<string, HumanDecision> = new Map();
 
@@ -252,6 +256,22 @@ export class Orchestrator {
     // Phase 2: Execution loop.
     this.phase = 'executing';
     await this.executePlan();
+
+    // Say what could not be re-read, once, before the pile is reviewed.
+    //
+    // These are not findings and must never become queue items: a field whose
+    // bounds this designer keeps in its own state and never renders is built
+    // and correct. But dropping the check silently would be its own dishonesty
+    // -- the reviewer is entitled to know which claims the platform let us
+    // confirm and which it did not.
+    for (const [attr, n] of this.unobservable) {
+      this.journal.note(
+        'verify',
+        `${n} field(s) carry ${attr} that this platform states nowhere on the ` +
+        `form: they were entered, and there is no surface to read them back ` +
+        `from. Not re-checked, and not reported as findings.`,
+      );
+    }
 
     // Phase 3: clear the parked pile.
     //
@@ -734,7 +754,7 @@ export class Orchestrator {
     intent: IntentRecord,
   ): Promise<void> {
     const { observation } = await this.driver.perceiveAfterSettle(200);
-    const verdict = compareIntent(observation, intent);
+    const verdict = this.countUnobservable(compareIntent(observation, intent));
 
     if (verdict.verdict === 'VERIFIED') {
       await this.markVerified(itemKey, {
@@ -1218,7 +1238,7 @@ export class Orchestrator {
     // committed, which is the only surface that speaks for what was persisted
     // -- and persistence is the thing being claimed.
     const { observation: finalObs } = await this.driver.perceiveAfterSettle(300);
-    const verdict = compareIntent(finalObs, intent);
+    const verdict = this.countUnobservable(compareIntent(finalObs, intent));
 
     if (verdict.verdict !== 'VERIFIED') {
       this.pendingVerification.push({ itemKey, item, field, intent });
@@ -1757,7 +1777,7 @@ export class Orchestrator {
     let recovered = 0;
 
     for (const { itemKey, item, field, intent } of pending) {
-      const verdict = compareIntent(observation, intent);
+      const verdict = this.countUnobservable(compareIntent(observation, intent));
 
       if (verdict.verdict === 'VERIFIED') {
         await applyTransition(this.adapter, this.runState, itemKey, 'verify_verified');
@@ -2036,6 +2056,14 @@ export class Orchestrator {
   // -------------------------------------------------------------------------
   // Escalation.
   // -------------------------------------------------------------------------
+
+  /** Record what a read-back could not check, so the run can say it once. */
+  private countUnobservable(verdict: VerdictResult): VerdictResult {
+    for (const attr of verdict.unobservable ?? []) {
+      this.unobservable.set(attr, (this.unobservable.get(attr) ?? 0) + 1);
+    }
+    return verdict;
+  }
 
   /**
    * Escalate an item to the human gate.

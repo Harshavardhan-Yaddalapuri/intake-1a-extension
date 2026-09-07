@@ -68,6 +68,11 @@ export interface ObservationElement {
    *  observation cannot tell them apart and BIND is choosing blind.
    *  Plain observed text — no interpretation, no domain knowledge. */
   groupText?: string;
+  /** The same text as the separate runs the container holds, before they were
+   *  joined. A field's own name is one WHOLE run; it is not any prefix of the
+   *  joined string, and reading it as one lets "Consent" answer for the card
+   *  belonging to "Consent Obtained". */
+  groupTextParts?: string[];
 }
 
 export interface Observation {
@@ -522,10 +527,14 @@ const GROUP_TEXT_MAX_PARTS = 8;
  *  text-bearing ancestor is the page root cannot walk the whole document. */
 const GROUP_TEXT_MAX_NODES = 120;
 
-/** Text contributed by `container` itself rather than by any control inside it. */
-function groupTextOf(container: Element): string {
+/** Text contributed by `container` itself rather than by any control inside it,
+ *  as the separate runs of text the container actually holds. Kept apart rather
+ *  than joined: a card reading "Consent Obtained" and "Yes/No Toggle" flattens
+ *  to a string that opens with the name of a DIFFERENT field, "Consent", and no
+ *  reader of the flattened form can tell the two apart. */
+function groupTextPartsOf(container: Element): string[] {
   const doc = container.ownerDocument;
-  if (!doc) return '';
+  if (!doc) return [];
   const parts: string[] = [];
   // 4 === NodeFilter.SHOW_TEXT. Spelled numerically so this runs under jsdom
   // and in the service worker without the NodeFilter global.
@@ -543,21 +552,38 @@ function groupTextOf(container: Element): string {
     }
     node = walker.nextNode();
   }
-  return parts.join(' ').replace(/\s+/g, ' ').trim();
+  return parts.map((p) => p.replace(/\s+/g, ' ').trim()).filter(Boolean);
 }
 
-/** Nearest ancestor group text for an interactive element. Walks outward until
- *  a container contributes text of its own. */
-export function computeGroupText(el: Element): string | undefined {
+/** Nearest ancestor group text for an interactive element, as its separate
+ *  runs of text. Walks outward until a container contributes text of its own. */
+export function computeGroupTextParts(el: Element): string[] | undefined {
   let cur = el.parentElement;
   let depth = 0;
   while (cur && depth < GROUP_TEXT_MAX_DEPTH) {
-    const text = groupTextOf(cur);
-    if (text) return text.slice(0, GROUP_TEXT_MAX_LEN);
+    const parts = groupTextPartsOf(cur);
+    if (parts.length > 0) return capParts(parts);
     cur = cur.parentElement;
     depth += 1;
   }
   return undefined;
+}
+
+/** Keep the joined form within the observation's size budget. */
+function capParts(parts: string[]): string[] {
+  const kept: string[] = [];
+  let len = 0;
+  for (const p of parts) {
+    if (len + p.length > GROUP_TEXT_MAX_LEN) break;
+    kept.push(p);
+    len += p.length + 1;
+  }
+  return kept.length > 0 ? kept : [parts[0].slice(0, GROUP_TEXT_MAX_LEN)];
+}
+
+export function computeGroupText(el: Element): string | undefined {
+  const parts = computeGroupTextParts(el);
+  return parts ? parts.join(' ') : undefined;
 }
 
 export function isPerceivable(el: Element): boolean {
@@ -622,6 +648,7 @@ export function observe(root?: Document | Element): Observation {
     const role = computeRole(el);
     const acc = computeAccname(el, doc);
     const labelUncertain = acc.source === 'placeholder' || acc.source === 'title' || acc.source === 'none';
+    const groupParts = computeGroupTextParts(el);
     index += 1;
     elements.push({
       index,
@@ -634,7 +661,8 @@ export function observe(root?: Document | Element): Observation {
       options: computeOptions(el, role, doc),
       tagName: el.tagName.toLowerCase(),
       inputType: el.tagName.toLowerCase() === 'input' ? (el as HTMLInputElement).type : undefined,
-      groupText: computeGroupText(el),
+      groupText: groupParts ? groupParts.join(' ') : undefined,
+      groupTextParts: groupParts,
     });
   }
 

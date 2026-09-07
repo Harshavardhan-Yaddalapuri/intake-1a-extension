@@ -52,6 +52,14 @@ export interface VerdictResult {
   /** The specific trap suspected, if AMBIGUOUS (e.g. "range read after type
    *  set: absent; platform may silently discard range on type change"). */
   suspected_trap?: string;
+  /** Attributes this platform states nowhere, for any field: they were entered
+   *  but the surface offers no evidence to re-read them by.
+   *
+   *  Silence is not disagreement. A platform that keeps a field's bounds in its
+   *  own state and renders a preview control without them has not discarded
+   *  anything, and saying so 59 times buries the findings that are real. These
+   *  are counted once for the run instead. */
+  unobservable?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +86,9 @@ export interface NameMatch {
    *  `el` is then one member of that group, so its role is the option's role
    *  and not the field's. Only a choice type may be realised this way. */
   viaOptionGroup?: boolean;
+  /** Every member of that option group, in document order. The field's option
+   *  vocabulary is carried in these names and nowhere else. */
+  members?: ObservationElement[];
 }
 
 /** Resolve an intent label to at most one element.
@@ -127,17 +138,28 @@ export function resolveByName(
   // one of them stands for the field, since they share its role and answer for
   // its value.
   const optionsOf = optionGroup(obs, target);
-  if (optionsOf) return { el: optionsOf, exact: false, viaOptionGroup: true };
+  if (optionsOf) {
+    return { el: optionsOf[0], exact: false, viaOptionGroup: true, members: optionsOf };
+  }
+
+  // A field need not name ANY of its controls. A yes/no toggle is often two
+  // buttons reading "Yes" and "No"; the field's own name is on the card around
+  // them and on nothing else. Nothing then answers to "Informed Consent
+  // Obtained" though the field is built, required, and saves correctly. Live,
+  // that was every yes/no field in the study.
+  const carded = cardGroup(obs, target);
+  if (carded) return { el: carded, exact: false };
 
   return null;
 }
 
 /**
- * The member of a same-role option group whose names all extend `target`, or
- * undefined when the observation holds no such group. Returned rather than a
- * synthetic element so callers still get a real handle to read state from.
+ * The members of a same-role option group whose names all extend `target`, in
+ * document order, or undefined when the observation holds no such group.
+ * Real elements rather than a synthetic one, so callers keep a handle to read
+ * state from -- and so the option vocabulary can be read back off their names.
  */
-function optionGroup(obs: Observation, target: string): ObservationElement | undefined {
+function optionGroup(obs: Observation, target: string): ObservationElement[] | undefined {
   const members = obs.elements.filter((e) => {
     const n = normaliseLabel(e.name);
     if (n === target || !n.startsWith(target)) return false;
@@ -148,7 +170,41 @@ function optionGroup(obs: Observation, target: string): ObservationElement | und
   if (members.length < 2) return undefined;
 
   const roles = new Set(members.map((m) => m.role));
-  return roles.size === 1 ? members[0] : undefined;
+  return roles.size === 1 ? members : undefined;
+}
+
+/** The option labels an option group states, in order: each member's name with
+ *  the field's label and the separator that follows it removed. */
+export function optionGroupLabels(members: ObservationElement[], label: string): string[] {
+  const target = normaliseLabel(label);
+  return members.map((m) => normaliseLabel(m.name).slice(target.length).replace(/^[\s:\-–—.,/|]+/, ''));
+}
+
+/**
+ * A control sitting inside a group that carries the field's name as one of its
+ * own runs of text, for a field that names none of its controls.
+ *
+ * The label must be a WHOLE run, never a prefix of the group's joined text. A
+ * card reading "Consent Obtained" / "Yes/No Toggle" joins to a string opening
+ * with "Consent", and a prefix rule would report a missing "Consent" as built.
+ * A missing field reported as present is the one failure this agent must never
+ * produce, so the test is equality against a run the platform actually drew.
+ */
+function cardGroup(obs: Observation, target: string): ObservationElement | undefined {
+  const inNamedGroup = obs.elements.filter(
+    (e) => e.groupTextParts?.some((p) => normaliseLabel(p) === target),
+  );
+  if (inNamedGroup.length === 0) return undefined;
+
+  // Several enclosures can hold the name -- the card, and the canvas that
+  // contains every card. The tightest one is the field's, and it is the one
+  // with the least text around it.
+  const byGroup = new Map<string, ObservationElement[]>();
+  for (const e of inNamedGroup) {
+    const key = e.groupText ?? '';
+    byGroup.set(key, [...(byGroup.get(key) ?? []), e]);
+  }
+  return [...byGroup.entries()].sort((a, b) => a[0].length - b[0].length)[0]?.[1][0];
 }
 
 /** Map a canonical type to the ARIA role(s) that realize it. This is the
@@ -242,9 +298,27 @@ export function compareIntent(obs: Observation, intent: IntentRecord): VerdictRe
 
   // Coded values: count and content must match (criterion 6: pairs, not
   // labels-only; append-vs-replace traps).
+  const unobservable: string[] = [];
+
   if (intent.coded_pairs && intent.coded_pairs.length > 0) {
     const expectedLabels = intent.coded_pairs.map((p) => p.label);
-    const actual = el.options ?? [];
+    const expectedSet = new Set(expectedLabels.map(normaliseLabel));
+
+    // Where the field IS its options, the vocabulary is in their names and in
+    // no `options` list: one radio input reports no options, though the three
+    // beside it spell out every coded value. Read them there.
+    const raw = match.viaOptionGroup && match.members
+      ? optionGroupLabels(match.members, intent.label)
+      : (el.options ?? []);
+
+    // A select's prompt row ("-- Select --") is the platform's, not the
+    // study's, and it made every dropdown in the file read as one value too
+    // many. Drop a single leading entry the study never asked for; a value
+    // that was actually dropped or replaced still lands as a mismatch below.
+    const actual = raw.length > 0 && !expectedSet.has(normaliseLabel(raw[0]))
+      ? raw.slice(1)
+      : raw;
+
     if (actual.length === 0) {
       return {
         verdict: 'AMBIGUOUS',
@@ -266,7 +340,7 @@ export function compareIntent(obs: Observation, intent: IntentRecord): VerdictRe
       };
     }
     for (let i = 0; i < expectedLabels.length; i += 1) {
-      if (actual[i] !== expectedLabels[i]) {
+      if (normaliseLabel(actual[i]) !== normaliseLabel(expectedLabels[i])) {
         return {
           verdict: 'AMBIGUOUS',
           reason:
@@ -285,20 +359,15 @@ export function compareIntent(obs: Observation, intent: IntentRecord): VerdictRe
     const observed = el.state.range;
     const wanted = intent.range_units;
 
+    // Absent bounds are silence, not a discarded range. This platform holds a
+    // field's min and max in its own state and renders the preview control
+    // without them, so every one of the 59 bounded fields in the study read
+    // back as "range discarded" -- and the reviewer had 59 correctly-built
+    // fields to open and check. A range that is stated and DIFFERENT is still
+    // the silent-discard trap, and is still reported below.
     if (!observed || (observed.min === undefined && observed.max === undefined)) {
-      return {
-        verdict: 'AMBIGUOUS',
-        reason:
-          `element "${intent.label}" declares no range bounds, but intent ` +
-          `specifies ${wanted.min}-${wanted.max}`,
-        suspected_trap:
-          'range absent after type set: the platform may have silently ' +
-          'discarded the range when the control type changed, or it does not ' +
-          'expose bounds in the accessibility tree',
-      };
-    }
-
-    if (observed.min !== wanted.min || observed.max !== wanted.max) {
+      unobservable.push('range bounds');
+    } else if (observed.min !== wanted.min || observed.max !== wanted.max) {
       return {
         verdict: 'AMBIGUOUS',
         reason:
@@ -310,21 +379,16 @@ export function compareIntent(obs: Observation, intent: IntentRecord): VerdictRe
       };
     }
 
-    // Units are not an ARIA concept. Look for the unit string in the
-    // accessible name. Absence is AMBIGUOUS, never FAILED — units are often
-    // rendered presentationally and may be genuinely present but unobservable.
+    // Units are not an ARIA concept, so a platform states them wherever it
+    // likes: inside the accessible name ("Height (cm)"), or as plain text
+    // beside the control, which PERCEIVE reports as the group it sits in.
+    // Look in both before concluding anything. Finding the unit nowhere is
+    // silence -- the platform may render it somewhere unobservable -- so it is
+    // counted, not reported as a defect on a field that has it.
     if (wanted.units) {
-      const haystack = normaliseLabel(el.name);
+      const haystack = `${normaliseLabel(el.name)} ${normaliseLabel(el.groupText ?? '')}`;
       if (!haystack.includes(wanted.units.toLowerCase())) {
-        return {
-          verdict: 'AMBIGUOUS',
-          reason:
-            `element "${intent.label}" does not expose the unit "${wanted.units}" ` +
-            `in its accessible name`,
-          suspected_trap:
-            'units may be rendered presentationally and not exposed to the ' +
-            'accessibility tree, or they were not applied',
-        };
+        unobservable.push(`units (${wanted.units})`);
       }
     }
   }
@@ -350,6 +414,7 @@ export function compareIntent(obs: Observation, intent: IntentRecord): VerdictRe
       `element "${intent.label}" present with role "${el.role}" matching ` +
       `"${intent.canonical_type}"` +
       (intent.coded_pairs ? ` and ${intent.coded_pairs.length} coded values` : ''),
+    ...(unobservable.length > 0 ? { unobservable } : {}),
   };
 }
 
