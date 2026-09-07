@@ -64,6 +64,7 @@ import {
   bindFieldAdd,
   findByRole,
   findByNameOnly,
+  findAddCodedValueControl,
   expectedRolesForType,
 } from '../bind/rung0';
 import { ProbeRunner } from './probe-runner';
@@ -1155,10 +1156,6 @@ export class Orchestrator {
         .filter((c) => !codes.some((ci) => ci.el.handle === c.el.handle));
       return labels.slice(Math.max(0, labels.length - codeCount));
     };
-    const addRowControlOf = (o: Observation) =>
-      findByRole(o, 'button', { contains: 'add' })
-        .filter((b) => b.el.name.toLowerCase().includes('value'))[0]?.el;
-
     // An editor that renders one row per existing value offers NO code/label
     // inputs until a row exists, so the row-adding control has to be pressed
     // before there is anything to type into. The previous order -- type, then
@@ -1176,7 +1173,7 @@ export class Orchestrator {
       let codes = codesOf(observation);
 
       if (codes.length <= i) {
-        const add = addRowControlOf(observation);
+        const add = findAddCodedValueControl(observation);
         if (!add) break;
         await this.driver.click(add.handle);
         await this.sleep(200);
@@ -1190,6 +1187,14 @@ export class Orchestrator {
       if (rowLabels[i]) await this.driver.setValue(rowLabels[i].el.handle, pair.label);
     }
 
+    // Platforms that keep option inputs uncontrolled (draft text excluded from
+    // the layout key) do not re-render the canvas after the last label is
+    // typed. Live, Race's fifth checkbox stayed aria-labelled "Race: " while
+    // the Options panel already held OT/Other — VERIFY then saw a blank option
+    // and parked every multi_select. Nudge a shape-changing add+remove so the
+    // canvas catches up before deferred type read-back / set_required.
+    await this.nudgeCodedValuesCanvasRefresh(codesOf);
+
     // The options now exist, so the control finally shows what it is. Settle
     // any read-back this type deferred at add time.
     const deferredFrom = this.deferredTypeProbe.get(field.canonical_type);
@@ -1200,6 +1205,31 @@ export class Orchestrator {
         item, itemKey, field, deferredFrom, realised, /* mayDefer */ false,
       );
     }
+  }
+
+  /**
+   * Force a layout-key change after coded-value text writes so the canvas
+   * re-renders option labels that live only in platform state until then.
+   */
+  private async nudgeCodedValuesCanvasRefresh(
+    codesOf: (o: Observation) => ReturnType<typeof findByRole>,
+  ): Promise<void> {
+    let { observation } = await this.driver.perceive();
+    const before = codesOf(observation).length;
+    const add = findAddCodedValueControl(observation);
+    if (!add) return;
+    await this.driver.click(add.handle);
+    await this.sleep(150);
+    ({ observation } = await this.driver.perceive());
+    if (codesOf(observation).length <= before) return;
+    const removes = observation.elements.filter(
+      (e) =>
+        e.role === 'button' &&
+        (e.name === '×' || e.name.toLowerCase().includes('remove')),
+    );
+    if (removes.length === 0) return;
+    await this.driver.click(removes[removes.length - 1].handle);
+    await this.sleep(150);
   }
 
   private async executeFieldSetRequired(

@@ -873,6 +873,28 @@ export function bindFieldSetFormula(obs: Observation): BindingRecord | null {
   );
 }
 
+
+/**
+ * The control that appends a coded-value row ("+ Add Value"), not the bulk
+ * paste apply button.
+ *
+ * `contains: 'add'` alone matches "Apply Pasted Values" because "pasted"
+ * contains the substring "add". That button REPLACES the list when the paste
+ * box is non-empty and is a no-op when empty — either way it is not the
+ * row-adding control. Require a word-boundary `add` and exclude paste/apply.
+ */
+export function findAddCodedValueControl(obs: Observation): ObservationElement | undefined {
+  return findByRole(obs, 'button', { contains: 'add' })
+    .map((c) => c.el)
+    .find((el) => {
+      const n = el.name.toLowerCase();
+      if (!/\badd\b/.test(n)) return false;
+      if (!n.includes('value')) return false;
+      if (n.includes('paste') || n.includes('apply')) return false;
+      return true;
+    });
+}
+
 // ---------------------------------------------------------------------------
 // field.set_coded_values: at rung 0, find the value editor structure.
 // ---------------------------------------------------------------------------
@@ -889,11 +911,11 @@ export function bindFieldSetCodedValues(obs: Observation): BindingRecord | null 
     (c) => !codeInputs.some((code) => code.el.handle === c.el.handle),
   );
 
-  // Also look for an "add value" button.
-  const addValueBtns = findByRole(obs, 'button', { contains: 'add' }).filter(
-    (b) => b.el.name.toLowerCase().includes('value'),
-  );
-  void addValueBtns;
+  // Also look for an "add value" button (not "Apply Pasted Values").
+  const addValueEl = findAddCodedValueControl(obs);
+  const addValueBtns = addValueEl
+    ? [{ el: addValueEl, evidence: `add value button: ${addValueEl.name}`, confidence: 'structural' as const }]
+    : [];
 
   // Or a paste textarea + apply button.
   const pasteTextareas = obs.elements.filter(

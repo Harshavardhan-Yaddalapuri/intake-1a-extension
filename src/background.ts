@@ -21,6 +21,47 @@ import type {
 import { Orchestrator, type OrchestratorCallbacks } from './engine/orchestrator';
 import { toJsonl, toHtmlReport } from './engine/journal';
 
+
+// ---------------------------------------------------------------------------
+// Keep the MV3 service worker alive for the duration of a run.
+//
+// A long `orchestrator.execute()` is ordinary async work, not an extension
+// event, so Chrome will terminate the worker after ~30s of "idle" even while
+// the promise is outstanding. Live, that froze the build on Demographics →
+// Race: the side panel kept showing the last RUN_PROGRESS broadcast, the
+// Options panel already held the coded values, and GET_RUN_STATE reported
+// phase "idle" / "no run has started" because `orchestrator` was gone.
+//
+// A connected port from the open side panel resets the idle timer. An alarm
+// while a run is in flight is the backup if the panel closes.
+// ---------------------------------------------------------------------------
+
+const KEEPALIVE_ALARM = 'intake-run-keepalive';
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'sidepanel-keepalive') return;
+  // Holding the port open is the keep-alive; no messages required.
+  port.onDisconnect.addListener(() => {
+    // Side panel closed or worker is restarting — nothing to do.
+  });
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== KEEPALIVE_ALARM) return;
+  // Touching extension state is enough to prove the worker is still wanted.
+  void chrome.storage.session.get('keepaliveTick').then(() =>
+    chrome.storage.session.set({ keepaliveTick: Date.now() }),
+  );
+});
+
+async function startRunKeepAlive(): Promise<void> {
+  await chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 1 });
+}
+
+async function stopRunKeepAlive(): Promise<void> {
+  await chrome.alarms.clear(KEEPALIVE_ALARM);
+}
+
 // ---------------------------------------------------------------------------
 // Orchestrator state.
 // ---------------------------------------------------------------------------
@@ -127,22 +168,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
           sendResponse({ ok: true });
 
-          // Run asynchronously (don't block the response).
-          orchestrator.execute().catch((err) => {
-            console.error('[orchestrator] execution error:', err);
-            broadcast({
-              type: 'RUN_COMPLETE',
-              summary: {
-                totalSteps: 0,
-                verified: 0,
-                escalated: 0,
-                failed: 0,
-                skipped: 0,
-                durationMs: 0,
-                escalations: [],
-              },
+          // Run asynchronously (don't block the response). Keep the worker
+          // alive for the whole flight — see startRunKeepAlive above.
+          void startRunKeepAlive();
+          orchestrator.execute()
+            .catch((err) => {
+              console.error('[orchestrator] execution error:', err);
+              broadcast({
+                type: 'RUN_COMPLETE',
+                summary: {
+                  totalSteps: 0,
+                  verified: 0,
+                  escalated: 0,
+                  failed: 0,
+                  skipped: 0,
+                  durationMs: 0,
+                  escalations: [],
+                },
+              });
+            })
+            .finally(() => {
+              void stopRunKeepAlive();
             });
-          });
         } catch (err) {
           sendResponse({ ok: false, error: String(err) });
         }

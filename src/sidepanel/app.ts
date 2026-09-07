@@ -717,6 +717,37 @@ function logEvent(event: string, detail: string): void {
   runtimeLog.push({ timestamp: Date.now(), event, detail });
 }
 
+
+// ---------------------------------------------------------------------------
+// Keep the service worker alive while this panel is open.
+// ---------------------------------------------------------------------------
+
+function connectKeepAlive(): void {
+  try {
+    const port = chrome.runtime.connect({ name: 'sidepanel-keepalive' });
+    port.onDisconnect.addListener(() => {
+      // Worker died or extension reloaded. If we thought a build was running,
+      // the in-memory orchestrator is gone — surface that instead of a zombie
+      // progress spinner stuck on the last field.
+      if (isRunning || isPaused) {
+        isRunning = false;
+        isPaused = false;
+        updateStatus(
+          'idle',
+          'Build agent stopped (extension worker restarted). Click Start to resume from saved progress.',
+        );
+        $('pause-btn')?.classList.add('hidden');
+        $('resume-btn')?.classList.add('hidden');
+        $('start-btn')?.classList.remove('hidden');
+      }
+      setTimeout(connectKeepAlive, 750);
+    });
+  } catch {
+    setTimeout(connectKeepAlive, 1500);
+  }
+}
+connectKeepAlive();
+
 // ---------------------------------------------------------------------------
 // On load: reconnect to running orchestrator.
 // ---------------------------------------------------------------------------
