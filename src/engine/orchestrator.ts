@@ -765,21 +765,12 @@ export class Orchestrator {
       return;
     }
 
-    await this.escalateItem(itemKey, 'verifying', {
-      key: itemKey,
-      fieldLabel: item.label,
-      formName: item.form_name,
-      visitName: item.visit_name,
-      canonicalType: item.canonical_type,
-      reason: verdict.reason,
-      suspectedTrap:
-        verdict.suspected_trap ??
-        'the range was set earlier but is absent now; the platform may have ' +
-        'discarded it when the control type was settled',
-      evidence: [verdict.reason],
-      verdict,
-      phase: 'verifying',
-    }, /* blocking */ false);
+    // A miss here is not yet a finding, for the same reason it is not one on
+    // the main path: this canvas re-renders only when the form's SHAPE changes,
+    // so a label typed a moment ago is still absent from it. Escalating here
+    // reported the field twice -- once now and once after the commit -- and the
+    // second look was the one that could see anything. Defer to it.
+    this.pendingVerification.push({ itemKey, item, field, intent });
   }
 
   // -------------------------------------------------------------------------

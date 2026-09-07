@@ -478,14 +478,55 @@ function nativeInteractive(el: Element): boolean {
   return true;
 }
 
+/**
+ * True when this element is where a pointer cursor STARTS.
+ *
+ * `cursor` is an inherited property, so a card styled `cursor: pointer` hands
+ * that value to every div and span inside it. Reading the computed value alone
+ * therefore says "clickable" about text, not just about the thing that is
+ * actually clickable. On this designer that turned each field's card into four
+ * controls -- head, label, meta, preview -- and the label span is named exactly
+ * the field's own name:
+ *
+ *   span.element-label "Ethnicity"  +  select[aria-label=Ethnicity]
+ *     -> "more than one element resolves to the label \"Ethnicity\""
+ *   span.element-label "Race"       +  checkboxes named "Race: White", ...
+ *     -> "element \"Race\" has role \"generic\""
+ *
+ * An element that merely inherited the value declared nothing. Only the one
+ * that changed it did.
+ */
 function hasCursorPointer(el: Element): boolean {
   try {
-    const style = el.ownerDocument.defaultView?.getComputedStyle(el);
-    if (style && style.cursor === 'pointer') return true;
+    const view = el.ownerDocument.defaultView;
+    if (!view) return false;
+    if (view.getComputedStyle(el).cursor !== 'pointer') return false;
+    const parent = el.parentElement;
+    return !parent || view.getComputedStyle(parent).cursor !== 'pointer';
   } catch {
     // jsdom or detached node: no computed style available.
   }
   return false;
+}
+
+/** Selector for the things a container may hold that make it a container.
+ *  Deliberately excludes the cursor heuristic: nesting one merely-clickable
+ *  box in another says nothing about which is the control. */
+const CONTROL_INSIDE =
+  'input,select,textarea,button,a[href],[tabindex],[role],summary,details,option';
+
+/** True when this element holds controls of its own.
+ *
+ *  A clickable box AROUND controls is a container, not a control. This
+ *  designer draws every field as a card that selects when clicked, so the card
+ *  reads as interactive, and its accessible name is everything written inside
+ *  it: "Sex at Birth *Radio Buttons · RequiredFemaleMaleUndisclosed". That name
+ *  begins with the field's label, so it collided with the field's real control
+ *  on every one of the 195 fields -- as a duplicate ("more than one element
+ *  resolves to Ethnicity"), as a role mismatch ("Sex at Birth has role
+ *  generic"), or by joining an option group and breaking it. */
+function containsControls(el: Element): boolean {
+  return el.querySelector(CONTROL_INSIDE) !== null;
 }
 
 export function isInteractive(el: Element): boolean {
@@ -501,7 +542,10 @@ export function isInteractive(el: Element): boolean {
   if (INTERACTIVE_ROLES.has(role)) return true;
   const tabindex = el.getAttribute('tabindex');
   if (tabindex !== null && Number(tabindex) >= 0) return true;
-  if (hasCursorPointer(el)) return true;
+  // Weakest signal, and the only one a container can trip by accident. An
+  // element that declares itself a control -- a real control, an ARIA role, a
+  // tab stop -- is one however it is styled and was accepted above.
+  if (hasCursorPointer(el) && !containsControls(el)) return true;
   return false;
 }
 
