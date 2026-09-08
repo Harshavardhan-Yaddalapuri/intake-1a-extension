@@ -1455,21 +1455,33 @@ export class Orchestrator {
 
     // Select the platform's OWN option label (e.g. "Visible When…"), never a
     // hardcoded "Conditional" string that Mock A does not offer.
-    const modeRes = await this.driver.selectOption(mode.handle, conditionalOption);
-    if (!modeRes.ok) {
-      await this.escalateItem(itemKey, 'acting', {
-        key: itemKey,
-        fieldLabel: field.label,
-        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
-        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
-        canonicalType: field.canonical_type,
-        reason: `failed to select visibility option "${conditionalOption}": ${modeRes.error ?? 'unknown'}`,
-        evidence: [modeRes.error ?? 'selectOption failed'],
-        phase: 'acting',
-      }, /* blocking */ false);
-      return;
+    //
+    // Mock A setVisibilityMode('when') RESETS whenElementId/equalsValue every
+    // time. Re-picking an already-conditional mode would wipe a partial write
+    // and is unnecessary — only change the mode when it is not yet conditional.
+    const modeValue = (mode.state.value ?? '').toLowerCase();
+    const alreadyConditional =
+      modeValue === 'when' ||
+      modeValue === conditionalOption.toLowerCase() ||
+      modeValue.includes('when') ||
+      ['when', 'conditional', 'if', 'depends'].some((w) => modeValue.includes(w));
+    if (!alreadyConditional) {
+      const modeRes = await this.driver.selectOption(mode.handle, conditionalOption);
+      if (!modeRes.ok) {
+        await this.escalateItem(itemKey, 'acting', {
+          key: itemKey,
+          fieldLabel: field.label,
+          formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+          visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+          canonicalType: field.canonical_type,
+          reason: `failed to select visibility option "${conditionalOption}": ${modeRes.error ?? 'unknown'}`,
+          evidence: [modeRes.error ?? 'selectOption failed'],
+          phase: 'acting',
+        }, /* blocking */ false);
+        return;
+      }
+      await this.sleep(300);
     }
-    await this.sleep(300);
 
     const { observation: afterMode } = await this.driver.perceive();
     const whenSelect = FieldPropertyWrites.findWhenFieldControl(
@@ -1492,10 +1504,12 @@ export class Orchestrator {
       return;
     }
 
-    const whenRes = await this.driver.selectOption(
-      whenSelect.handle,
-      field.skip_logic.when_field_label,
-    );
+    const whenOption =
+      FieldPropertyWrites.pickOptionLabel(
+        whenSelect.options,
+        field.skip_logic.when_field_label,
+      ) ?? field.skip_logic.when_field_label;
+    const whenRes = await this.driver.selectOption(whenSelect.handle, whenOption);
     if (!whenRes.ok) {
       await this.escalateItem(itemKey, 'acting', {
         key: itemKey,
@@ -1506,6 +1520,10 @@ export class Orchestrator {
         reason:
           `failed to select controlling field "${field.skip_logic.when_field_label}" ` +
           `in when-control: ${whenRes.error ?? 'unknown'}`,
+        suspectedTrap:
+          'when-element list may have self-excluded the controlling field because ' +
+          'the options panel was still editing that field (or a neighbour), not ' +
+          `"${field.label}"`,
         evidence: [whenRes.error ?? 'selectOption failed'],
         phase: 'acting',
       }, /* blocking */ false);
@@ -1533,12 +1551,13 @@ export class Orchestrator {
     await this.sleep(150);
 
     const { observation: finalObs } = await this.driver.perceiveAfterSettle(250);
+    const onField = FieldPropertyWrites.propertyPanelShowsField(finalObs, field.label);
     const check = FieldPropertyWrites.skipLogicLooksSet(
       finalObs,
       field.skip_logic.equals_value,
       field.skip_logic.when_field_label,
     );
-    if (check.ok) {
+    if (check.ok && onField) {
       await this.markVerified(itemKey, {
         rung: 0,
         evidence: [check.evidence, `mode option="${conditionalOption}"`],
@@ -1553,9 +1572,15 @@ export class Orchestrator {
       formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
       visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
       canonicalType: field.canonical_type,
-      reason: check.evidence,
-      suspectedTrap: 'skip logic write did not read back',
-      evidence: [check.evidence, `tried mode option="${conditionalOption}"`],
+      reason: onField ? check.evidence : `options panel is not editing "${field.label}" after skip write`,
+      suspectedTrap: onField
+        ? 'skip logic write did not read back'
+        : 'skip logic may have been written onto a different selected field',
+      evidence: [
+        check.evidence,
+        `tried mode option="${conditionalOption}"`,
+        onField ? 'property Label matches field' : 'property Label mismatch',
+      ],
       phase: 'verifying',
     }, /* blocking */ false);
   }
@@ -1566,12 +1591,51 @@ export class Orchestrator {
    * the currently selected element.
    */
   private async selectFieldForProperties(field: IrField): Promise<boolean> {
-    const { observation } = await this.driver.perceive();
+    // Form-end skip writes must edit THIS field's visibility. If the previous
+    // field (e.g. Outcome before Resolution Date) is still selected, When
+    // Element self-excludes that controlling label and selectOption fails —
+    // the live 4/13 miss pattern.
+    let { observation } = await this.driver.perceive();
+    if (FieldPropertyWrites.propertyPanelShowsField(observation, field.label)) {
+      return true;
+    }
+
+    const tryClick = async (handle: string): Promise<boolean> => {
+      await this.driver.click(handle);
+      await this.sleep(250);
+      const { observation: after } = await this.driver.perceive();
+      return FieldPropertyWrites.propertyPanelShowsField(after, field.label);
+    };
+
     const match = resolveByName(observation, field.label);
-    if (!match || match === 'ambiguous') return false;
-    await this.driver.click(match.el.handle);
-    await this.sleep(250);
-    return true;
+    if (match && match !== 'ambiguous') {
+      if (await tryClick(match.el.handle)) return true;
+      // Option-group / card-group: try every member.
+      if (match.members) {
+        for (const m of match.members) {
+          if (await tryClick(m.handle)) return true;
+        }
+      }
+    }
+
+    // Ambiguous or click-on-inner-control did not select the card: try every
+    // exact-name hit (canvas + preview duplicates).
+    const exact = observation.elements.filter((e) => e.name === field.label);
+    for (const el of exact) {
+      if (await tryClick(el.handle)) return true;
+    }
+
+    // Last resort: any control whose group text parts include the label
+    // (element-card chrome), preferring ones that are not the options Label.
+    const grouped = observation.elements.filter((e) =>
+      e.groupTextParts?.some((p) => p.trim() === field.label),
+    );
+    for (const el of grouped) {
+      if (await tryClick(el.handle)) return true;
+    }
+
+    ({ observation } = await this.driver.perceive());
+    return FieldPropertyWrites.propertyPanelShowsField(observation, field.label);
   }
 
   // -------------------------------------------------------------------------

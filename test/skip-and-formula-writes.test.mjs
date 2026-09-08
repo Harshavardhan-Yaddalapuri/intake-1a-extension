@@ -409,3 +409,214 @@ test('skipLogicLooksSet ok on full Mock A options panel with opaque when id', ()
   );
   assert.equal(check.ok, true, check.evidence);
 });
+
+
+// ---------------------------------------------------------------------------
+// Live Mock A 9/13→13/13: Resolution Date / Reason Not Administered.
+// Canvas choice dropdowns named like the controlling field (Outcome) must
+// never win over When Element; property Label must confirm the gated field.
+// ---------------------------------------------------------------------------
+
+const aeCanvasAndOptions = ({
+  selectedLabel = 'Resolution Date',
+  whenSelected = '',
+  includeOutcomeInWhen = true,
+} = {}) => {
+  const whenOpts = [
+    'Adverse Event Term',
+    'Onset Date and Time',
+    'Severity',
+    'Serious',
+    'Relationship to Study Drug',
+    'Action Taken with Study Drug',
+    ...(includeOutcomeInWhen ? ['Outcome'] : []),
+  ];
+  return `<div class="builder">
+  <div class="canvas">
+    <div class="element-card">
+      <span class="element-label">Outcome</span>
+      <select aria-label="Outcome">
+        <option>— Select —</option>
+        <option>Recovered</option>
+        <option>Recovered with Sequelae</option>
+        <option>Ongoing</option>
+        <option>Fatal</option>
+        <option>Unknown</option>
+      </select>
+    </div>
+    <div class="element-card">
+      <span class="element-label">Resolution Date</span>
+      <input type="text" aria-label="Resolution Date" placeholder="DD-MMM-YYYY">
+    </div>
+  </div>
+  <aside class="options"><h3>Options</h3>
+    <div class="row"><label for="opt-label">Label</label>
+      <input type="text" id="opt-label" value="${selectedLabel}"></div>
+    <div class="row"><label for="opt-type">Element Type</label>
+      <select id="opt-type">
+        <option>Calculated Field</option>
+        <option selected>Date</option>
+        <option>Dropdown</option>
+        <option>Yes/No Toggle</option>
+        <option>Multi-line Textbox</option>
+      </select></div>
+    <fieldset><legend>Element Visibility</legend>
+      <div class="row"><label for="opt-visibility">Visibility</label>
+        <select id="opt-visibility">
+          <option value="always">Visible</option>
+          <option value="when" selected>Visible When…</option>
+        </select></div>
+      <div class="row"><label for="opt-visibility-when">When Element</label>
+        <select id="opt-visibility-when">
+          <option value="">— choose element —</option>
+          ${whenOpts
+            .map(
+              (l) =>
+                `<option value="el_${l.replace(/\s+/g, '_')}"${
+                  l === whenSelected ? ' selected' : ''
+                }>${l}</option>`,
+            )
+            .join('')}
+        </select></div>
+      <div class="row"><label for="opt-visibility-value">Equals Value</label>
+        <input type="text" id="opt-visibility-value" value="${
+          whenSelected ? 'REC' : ''
+        }"></div>
+    </fieldset>
+  </aside>
+</div>`;
+};
+
+test('Resolution Date skip must not bind canvas Outcome select', () => {
+  const o = observe(
+    new JSDOM(
+      `<!doctype html><html><body>${aeCanvasAndOptions({
+        selectedLabel: 'Resolution Date',
+        includeOutcomeInWhen: true,
+      })}</body></html>`,
+    ).window.document,
+  );
+  const when = FieldPropertyWrites.findWhenFieldControl(o, 'Outcome');
+  assert.ok(when, 'when-element must be found');
+  assert.equal(when.name, 'When Element');
+  assert.ok(when.options.includes('Outcome'));
+  assert.equal(when.options.includes('Recovered'), false);
+});
+
+test('when Outcome is self-excluded, still return When Element not canvas Outcome', () => {
+  // Options panel still editing Outcome → When Element omits Outcome.
+  const o = observe(
+    new JSDOM(
+      `<!doctype html><html><body>${aeCanvasAndOptions({
+        selectedLabel: 'Outcome',
+        includeOutcomeInWhen: false,
+      })}</body></html>`,
+    ).window.document,
+  );
+  const when = FieldPropertyWrites.findWhenFieldControl(o, 'Outcome');
+  assert.ok(when, 'when-picker must still be located');
+  assert.equal(when.name, 'When Element');
+  assert.equal(when.options.includes('Outcome'), false);
+  assert.equal(
+    FieldPropertyWrites.propertyPanelShowsField(o, 'Resolution Date'),
+    false,
+  );
+  assert.equal(FieldPropertyWrites.propertyPanelShowsField(o, 'Outcome'), true);
+});
+
+test('Study Drug Administered when-control beats Element Type and Route dropdown', () => {
+  const html = `<div class="builder">
+  <div class="canvas">
+    <select aria-label="Route of Administration">
+      <option>— Select —</option><option>Subcutaneous</option><option>Intravenous</option>
+    </select>
+    <textarea aria-label="Reason Not Administered"></textarea>
+  </div>
+  <aside class="options">
+    <div class="row"><label for="opt-label">Label</label>
+      <input type="text" id="opt-label" value="Reason Not Administered"></div>
+    <div class="row"><label for="opt-type">Element Type</label>
+      <select id="opt-type">
+        <option>Calculated Field</option>
+        <option selected>Multi-line Textbox</option>
+        <option>Dropdown</option>
+        <option>Date</option>
+        <option>Yes/No Toggle</option>
+      </select></div>
+    <fieldset><legend>Element Visibility</legend>
+      <div class="row"><label for="opt-visibility">Visibility</label>
+        <select id="opt-visibility">
+          <option value="always">Visible</option>
+          <option value="when" selected>Visible When…</option>
+        </select></div>
+      <div class="row"><label for="opt-visibility-when">When Element</label>
+        <select id="opt-visibility-when">
+          <option value="">— choose element —</option>
+          <option value="el_a">Study Drug Administered</option>
+          <option value="el_b">Administration Date</option>
+          <option value="el_c">Route of Administration</option>
+          <option value="el_d">Injection Site</option>
+        </select></div>
+      <div class="row"><label for="opt-visibility-value">Equals Value</label>
+        <input type="text" id="opt-visibility-value" value="No"></div>
+    </fieldset>
+  </aside>
+</div>`;
+  const o = observe(new JSDOM(`<!doctype html><html><body>${html}</body></html>`).window.document);
+  const when = FieldPropertyWrites.findWhenFieldControl(o, 'Study Drug Administered');
+  assert.ok(when);
+  assert.equal(when.name, 'When Element');
+  assert.ok(
+    FieldPropertyWrites.optionsIncludeLabel(when.options, 'Study Drug Administered'),
+  );
+  assert.equal(
+    FieldPropertyWrites.propertyPanelShowsField(o, 'Reason Not Administered'),
+    true,
+  );
+  const check = FieldPropertyWrites.skipLogicLooksSet(
+    o,
+    'No',
+    'Study Drug Administered',
+  );
+  // when not selected yet in this fixture
+  assert.equal(check.ok, false);
+});
+
+test('skipLogicLooksSet ok for REC on Resolution Date panel', () => {
+  const o = observe(
+    new JSDOM(
+      `<!doctype html><html><body>${aeCanvasAndOptions({
+        selectedLabel: 'Resolution Date',
+        whenSelected: 'Outcome',
+        includeOutcomeInWhen: true,
+      })}</body></html>`,
+    ).window.document,
+  );
+  assert.equal(
+    FieldPropertyWrites.propertyPanelShowsField(o, 'Resolution Date'),
+    true,
+  );
+  const check = FieldPropertyWrites.skipLogicLooksSet(o, 'REC', 'Outcome');
+  assert.equal(check.ok, true, check.evidence);
+});
+
+test('looksLikeElementTypeOptions detects Mock A type picker', () => {
+  assert.equal(
+    FieldPropertyWrites.looksLikeElementTypeOptions([
+      'Calculated Field',
+      'Check List',
+      'Date',
+      'Dropdown',
+      'Yes/No Toggle',
+    ]),
+    true,
+  );
+  assert.equal(
+    FieldPropertyWrites.looksLikeElementTypeOptions([
+      'Study Drug Administered',
+      'Administration Date',
+      'Injection Site',
+    ]),
+    false,
+  );
+});

@@ -86,18 +86,48 @@ export class FieldPropertyWrites {
     // When the IR controlling label is known, prefer a select that actually
     // offers it. That structurally beats 'Element Type' (and any other property
     // combobox) which can otherwise tie on weak lexical priors.
+    //
+    // Also skip Element-Type-shaped enums and canvas choice dropdowns whose
+    // options are coded values (Recovered/ABN/…) rather than sibling labels.
+    // Live Mock A: Resolution Date skip bound the canvas Outcome <select>
+    // (name==="Outcome") when When Element had self-excluded Outcome, and
+    // Reason Not Administered similarly missed Study Drug Administered.
     const candidates: ObservationElement[] = [];
     for (const r of ranked) {
       const opts = r.el.options ?? [];
       if (opts.length < 2) continue;
       if (FieldPropertyWrites.looksLikeVisibilityModeOptions(opts)) continue;
+      if (FieldPropertyWrites.looksLikeElementTypeOptions(opts)) continue;
       candidates.push(r.el);
     }
     if (expectedWhenLabel) {
-      const offering = candidates.find((el) => el.options.includes(expectedWhenLabel));
+      const want = expectedWhenLabel.trim();
+      const offering = candidates.find((el) =>
+        FieldPropertyWrites.optionsIncludeLabel(el.options, want),
+      );
       if (offering) return offering;
+      // Controlling label missing (often self-excluded because the options
+      // panel is still editing that field). Still return the when-picker —
+      // identified by Mock A's "choose element" placeholder — never a canvas
+      // coded-value dropdown whose name equals the controlling label
+      // (Outcome → Recovered/…), which makes selectOption fail confusingly.
+      const whenShaped = candidates.find((el) =>
+        FieldPropertyWrites.looksLikeWhenElementPicker(el.options),
+      );
+      return whenShaped ?? null;
     }
-    return candidates[0] ?? null;
+    return (
+      candidates.find((el) =>
+        FieldPropertyWrites.looksLikeWhenElementPicker(el.options),
+      ) ??
+      candidates[0] ??
+      null
+    );
+  }
+
+  /** Mock A's When Element select leads with "— choose element —". */
+  static looksLikeWhenElementPicker(options: readonly string[]): boolean {
+    return options.some((o) => /choose\s+element/i.test(o));
   }
 
   /** True when option labels look like a visibility mode enum, not field names. */
@@ -113,6 +143,61 @@ export class FieldPropertyWrites {
       }
     }
     return conditional >= 1 && alwaysish >= 1;
+  }
+
+  /**
+   * True when options look like an element-type picker (Dropdown, Date,
+   * Yes/No Toggle, …) rather than sibling field labels on the form.
+   */
+  static looksLikeElementTypeOptions(options: readonly string[]): boolean {
+    if (options.length < 4) return false;
+    const typeWords = [
+      'textbox', 'dropdown', 'checkbox', 'date', 'time', 'toggle',
+      'calculated', 'radio', 'number', 'checklist', 'check list',
+    ];
+    let hits = 0;
+    for (const opt of options) {
+      const n = opt.toLowerCase();
+      if (typeWords.some((w) => n.includes(w))) hits += 1;
+    }
+    return hits >= 3;
+  }
+
+  /** Option list membership with light normalisation (trim / required star). */
+  static optionsIncludeLabel(options: readonly string[], label: string): boolean {
+    const want = label.trim().replace(/\s*\*$/, '');
+    for (const opt of options) {
+      const got = opt.trim().replace(/\s*\*$/, '');
+      if (got === want) return true;
+    }
+    return false;
+  }
+
+  /** Actual option text to pass to selectOption (preserves platform wording). */
+  static pickOptionLabel(options: readonly string[], label: string): string | null {
+    const want = label.trim().replace(/\s*\*$/, '');
+    for (const opt of options) {
+      const got = opt.trim().replace(/\s*\*$/, '');
+      if (got === want) return opt;
+    }
+    return null;
+  }
+
+  /** The property-editor Label textbox (not coded-value row labels). */
+  static findPropertyLabelInput(obs: Observation): ObservationElement | null {
+    const pool = enumerateByRoles(obs, ['textbox', 'searchbox']);
+    const exact = pool.find((el) => el.name.trim().toLowerCase() === 'label');
+    if (exact) return exact;
+    return rankCandidates(pool, { hint: 'name_input' })[0]?.el ?? null;
+  }
+
+  /** True when the options panel is editing the named field. */
+  static propertyPanelShowsField(obs: Observation, fieldLabel: string): boolean {
+    const input = FieldPropertyWrites.findPropertyLabelInput(obs);
+    if (!input) return false;
+    const raw = (input.state.value ?? '').trim().replace(/\s*\*$/, '');
+    const want = fieldLabel.trim().replace(/\s*\*$/, '');
+    return raw === want;
   }
 
   /** The equals/value textbox for the skip rule. */
