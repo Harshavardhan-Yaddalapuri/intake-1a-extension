@@ -620,3 +620,161 @@ test('looksLikeElementTypeOptions detects Mock A type picker', () => {
     false,
   );
 });
+
+// ---------------------------------------------------------------------------
+// Live Mock A 12/13: Primary Reason for Discontinuation.
+// End of Treatment sibling labels contain "Date"/"Number" substrings; the
+// Element Type heuristic must not discard When Element (and must still prefer
+// it over the gated field's own coded-value dropdown).
+// ---------------------------------------------------------------------------
+
+const eotCanvasAndOptions = ({
+  selectedLabel = 'Primary Reason for Discontinuation',
+  whenSelected = '',
+  includeCompletedInWhen = true,
+} = {}) => {
+  const whenOpts = [
+    'End of Treatment Date',
+    ...(includeCompletedInWhen ? ['Completed Treatment as Planned'] : []),
+    'Date of Last Dose',
+    'Number of Doses Received',
+    'Discontinuation Comments',
+    'Subject Withdrew Consent',
+  ];
+  return `<div class="builder">
+  <div class="canvas">
+    <div class="element-card">
+      <span class="element-label">Completed Treatment as Planned</span>
+      <button type="button">Yes</button><button type="button">No</button>
+    </div>
+    <div class="element-card">
+      <span class="element-label">Primary Reason for Discontinuation</span>
+      <select aria-label="Primary Reason for Discontinuation">
+        <option>— Select —</option>
+        <option>Adverse Event</option>
+        <option>Lack of Efficacy</option>
+        <option>Withdrawal by Subject</option>
+        <option>Lost to Follow-Up</option>
+        <option>Protocol Deviation</option>
+        <option>Other</option>
+      </select>
+    </div>
+  </div>
+  <aside class="options"><h3>Options</h3>
+    <div class="row"><label for="opt-label">Label</label>
+      <input type="text" id="opt-label" value="${selectedLabel}"></div>
+    <div class="row"><label for="opt-type">Element Type</label>
+      <select id="opt-type">
+        <option>Calculated Field</option>
+        <option>Check List</option>
+        <option>Checkbox</option>
+        <option>Date</option>
+        <option selected>Dropdown</option>
+        <option>Multi-line Textbox</option>
+        <option>Number (Decimal)</option>
+        <option>Number (Whole)</option>
+        <option>Radio Buttons</option>
+        <option>Single Line Textbox</option>
+        <option>Time</option>
+        <option>Date/Time</option>
+        <option>Yes/No Toggle</option>
+      </select></div>
+    <fieldset class="values"><legend>Values</legend>
+      <div class="row compact"><label for="value-label-0">Label</label>
+        <input type="text" id="value-label-0" value="Adverse Event"></div>
+    </fieldset>
+    <fieldset><legend>Element Visibility</legend>
+      <div class="row"><label for="opt-visibility">Visibility</label>
+        <select id="opt-visibility">
+          <option value="always">Visible</option>
+          <option value="when" selected>Visible When…</option>
+        </select></div>
+      <div class="row"><label for="opt-visibility-when">When Element</label>
+        <select id="opt-visibility-when">
+          <option value="">— choose element —</option>
+          ${whenOpts
+            .map(
+              (l) =>
+                `<option value="el_${l.replace(/\s+/g, '_')}"${
+                  l === whenSelected ? ' selected' : ''
+                }>${l}</option>`,
+            )
+            .join('')}
+        </select></div>
+      <div class="row"><label for="opt-visibility-value">Equals Value</label>
+        <input type="text" id="opt-visibility-value" value="${
+          whenSelected ? 'No' : ''
+        }"></div>
+    </fieldset>
+  </aside>
+</div>`;
+};
+
+test('EOT When Element labels with Date/Number are not mistaken for Element Type', () => {
+  const whenOpts = [
+    '— choose element —',
+    'End of Treatment Date',
+    'Completed Treatment as Planned',
+    'Date of Last Dose',
+    'Number of Doses Received',
+    'Discontinuation Comments',
+    'Subject Withdrew Consent',
+  ];
+  assert.equal(FieldPropertyWrites.looksLikeElementTypeOptions(whenOpts), false);
+  assert.equal(FieldPropertyWrites.looksLikeWhenElementPicker(whenOpts), true);
+});
+
+test('Primary Reason skip binds When Element not canvas coded-value select', () => {
+  const o = observe(
+    new JSDOM(
+      `<!doctype html><html><body>${eotCanvasAndOptions({
+        selectedLabel: 'Primary Reason for Discontinuation',
+        includeCompletedInWhen: true,
+      })}</body></html>`,
+    ).window.document,
+  );
+  const when = FieldPropertyWrites.findWhenFieldControl(
+    o,
+    'Completed Treatment as Planned',
+  );
+  assert.ok(when, 'When Element must be findable');
+  assert.match(when.name.toLowerCase(), /when/);
+  assert.ok(
+    FieldPropertyWrites.optionsIncludeLabel(
+      when.options,
+      'Completed Treatment as Planned',
+    ),
+  );
+  assert.equal(
+    FieldPropertyWrites.pickOptionLabel(
+      when.options,
+      'Completed Treatment as Planned',
+    ),
+    'Completed Treatment as Planned',
+  );
+  assert.equal(
+    FieldPropertyWrites.propertyPanelShowsField(
+      o,
+      'Primary Reason for Discontinuation',
+    ),
+    true,
+  );
+});
+
+test('skipLogicLooksSet ok for No on Primary Reason panel', () => {
+  const o = observe(
+    new JSDOM(
+      `<!doctype html><html><body>${eotCanvasAndOptions({
+        selectedLabel: 'Primary Reason for Discontinuation',
+        whenSelected: 'Completed Treatment as Planned',
+        includeCompletedInWhen: true,
+      })}</body></html>`,
+    ).window.document,
+  );
+  const check = FieldPropertyWrites.skipLogicLooksSet(
+    o,
+    'No',
+    'Completed Treatment as Planned',
+  );
+  assert.equal(check.ok, true, check.evidence);
+});

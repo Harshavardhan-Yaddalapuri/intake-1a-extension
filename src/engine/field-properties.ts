@@ -97,7 +97,15 @@ export class FieldPropertyWrites {
       const opts = r.el.options ?? [];
       if (opts.length < 2) continue;
       if (FieldPropertyWrites.looksLikeVisibilityModeOptions(opts)) continue;
-      if (FieldPropertyWrites.looksLikeElementTypeOptions(opts)) continue;
+      // Never drop a When Element picker: sibling labels like "End of Treatment
+      // Date" / "Number of Doses Received" can false-positive the type-enum
+      // heuristic (live Mock A 12/13 — Primary Reason for Discontinuation).
+      if (
+        FieldPropertyWrites.looksLikeElementTypeOptions(opts) &&
+        !FieldPropertyWrites.looksLikeWhenElementPicker(opts)
+      ) {
+        continue;
+      }
       candidates.push(r.el);
     }
     if (expectedWhenLabel) {
@@ -157,7 +165,13 @@ export class FieldPropertyWrites {
     ];
     let hits = 0;
     for (const opt of options) {
-      const n = opt.toLowerCase();
+      const n = opt.toLowerCase().trim();
+      // Type-enum entries are short ("Date", "Number (Whole)", "Yes/No Toggle").
+      // Sibling field labels that merely contain those substrings — e.g. "End of
+      // Treatment Date", "Number of Doses Received" — must not count, or When
+      // Element on the End of Treatment form is discarded as Element Type.
+      const tokens = n.split(/[\s/]+/).filter(Boolean);
+      if (tokens.length > 3) continue;
       if (typeWords.some((w) => n.includes(w))) hits += 1;
     }
     return hits >= 3;
