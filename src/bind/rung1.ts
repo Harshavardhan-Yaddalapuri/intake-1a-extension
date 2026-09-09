@@ -227,22 +227,16 @@ export function inspectPlacedControl(
     placedControl = canvasControls[0];
   }
 
-  if (!placedControl) {
-    placedControl = addedElements.find(
-      (e) =>
-        e.role === 'combobox' ||
-        e.role === 'listbox' ||
-        e.role === 'radiogroup' ||
-        e.role === 'checkbox' ||
-        e.role === 'radio' ||
-        e.role === 'spinbutton' ||
-        e.role === 'textbox',
-    );
-  }
-
+  // NEVER fall back to the property panel. An empty choice control adds no
+  // interactive canvas node ("No values defined."); the panel's Label /
+  // Required / type picker always appear alongside it. Reading those as the
+  // placed field made Dial Group / Beam Pick look like a textbox, skipped
+  // deepen, and escalated radio to the human gate on clear probe-able tiles.
   if (!placedControl) {
     return {
-      observedRole: 'none',
+      // 'generic' + hasOptionsEditor is the deepen signal: the panel says this
+      // is a choice control, the canvas has not realised it yet.
+      observedRole: hasOptionsEditor ? 'generic' : 'none',
       observedOptions: [],
       mutualExclusivity: 'n/a',
       hasOptionsEditor,
@@ -250,7 +244,11 @@ export function inspectPlacedControl(
       hasFormulaEditor,
       hasDatePickerOptions,
       hasDecimalPlaces,
-      evidence: ['no new interactive element detected in diff after placing control'],
+      evidence: [
+        hasOptionsEditor
+          ? 'property panel offers an options editor but no interactive control appeared on the canvas yet (empty choice)'
+          : 'no new interactive element detected in diff after placing control',
+      ],
       destructive: false,
       discarded: false,
     };

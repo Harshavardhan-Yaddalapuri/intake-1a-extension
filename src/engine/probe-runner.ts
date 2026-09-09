@@ -52,9 +52,23 @@ export interface DiscoveredPaletteItem {
  *  multi_select. Deepening by adding values reveals the real control.
  */
 function needsChoiceDeepen(probe: ProbeResult): boolean {
-  if (probe.observedRole === 'generic' || probe.observedRole === 'none') return true;
+  // Only deepen when the panel claims this is a choice control. Deepening a
+  // plain text/date tile would click "+ Add Value" that does not exist.
+  if (!probe.hasOptionsEditor) return false;
   if (probe.observedOptions.length > 0) return false;
-  return probe.observedRole === 'checkbox' || probe.observedRole === 'button';
+  // Already a realised choice — nothing further to reveal.
+  if (
+    probe.observedRole === 'radiogroup' ||
+    probe.observedRole === 'radio' ||
+    probe.observedRole === 'listbox' ||
+    probe.observedRole === 'combobox'
+  ) {
+    return false;
+  }
+  // Empty choice: canvas has not realised options yet. Include textbox /
+  // checkbox / button / generic / none — historically the panel Label was
+  // misread as the placed control (role=textbox) and deepen never ran.
+  return true;
 }
 
 export class ProbeRunner {

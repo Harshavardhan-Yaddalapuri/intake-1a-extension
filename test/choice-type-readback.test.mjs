@@ -169,3 +169,68 @@ test('inverted-library: Beam Pick radio with values is not a dropdown', () => {
   assert.equal(classifyTypeFromProbe('radio', probe).matches, true, `role=${probe.observedRole}`);
   assert.equal(classifyTypeFromProbe('single_select', probe).matches, false);
 });
+
+test('empty Dial Group must not read the panel Label as the placed control', () => {
+  // Hostile / renamed palettes place an empty choice with only "No values
+  // defined." on the canvas. The property panel always brings Label + type
+  // picker + Required. Falling back to those made role=textbox, skipped
+  // deepen, and escalated radio to the human gate despite a clear tile.
+  const OPTIONS_ROSETTA = `<aside class="options"><h3>Options</h3>
+<div class="row"><label for="opt-label">Label</label><input type="text" id="opt-label" aria-label="Label"></div>
+<div class="row"><label for="opt-type">Element Type</label>
+<select id="opt-type" aria-label="Element Type"><option>Dial Group</option><option>Picker</option></select></div>
+<div class="row"><label for="opt-req">Required</label><input type="checkbox" id="opt-req" aria-label="Required"></div>
+<fieldset><legend>Values</legend><button type="button">+ Add Value</button></fieldset>
+<button type="button">Delete Element</button></aside>`;
+
+  const pre = observe(doc(screen(EXISTING, false)));
+  const post = observe(doc(
+    screen(
+      EXISTING + card('Dial Group', 'Dial Group', choicePrev('radio', 'Sex', [])),
+      false,
+    ).replace('</main>', `</main>${OPTIONS_ROSETTA}`),
+  ));
+  const probe = inspectPlacedControl(pre, post);
+  assert.notEqual(
+    probe.observedRole, 'textbox',
+    `panel Label must not be the placed control; got ${probe.evidence[0]}`,
+  );
+  assert.equal(
+    probe.hasOptionsEditor, true,
+    'options editor on the panel is the deepen signal',
+  );
+  assert.ok(
+    probe.observedRole === 'generic' || probe.observedRole === 'none',
+    `empty choice should be generic/none so deepen runs; got ${probe.observedRole}`,
+  );
+  assert.equal(
+    classifyTypeFromProbe('radio', probe).matches, false,
+    'still unclassifiable until values exist — deepen, do not escalate yet',
+  );
+  assert.equal(
+    classifyTypeFromProbe('text', probe).matches, false,
+    'must not vacously claim text via the Label textbox',
+  );
+});
+
+test('Dial Group with values classifies as radio, not single_select', () => {
+  const OPTIONS_ROSETTA = `<aside class="options"><h3>Options</h3>
+<div class="row"><label for="opt-label">Label</label><input type="text" id="opt-label" aria-label="Label"></div>
+<div class="row"><label for="opt-type">Element Type</label>
+<select id="opt-type" aria-label="Element Type"><option>Dial Group</option></select></div>
+<div class="row"><label for="opt-req">Required</label><input type="checkbox" id="opt-req" aria-label="Required"></div>
+<fieldset><legend>Values</legend><button type="button">+ Add Value</button></fieldset>
+<button type="button">Delete Element</button></aside>`;
+
+  const pre = observe(doc(screen(EXISTING, false)));
+  const post = observe(doc(
+    screen(
+      EXISTING + card('Dial Group', 'Dial Group', choicePrev('radio', 'Sex', ['F', 'M'])),
+      false,
+    ).replace('</main>', `</main>${OPTIONS_ROSETTA}`),
+  ));
+  const probe = inspectPlacedControl(pre, post);
+  assert.equal(classifyTypeFromProbe('radio', probe).matches, true, `role=${probe.observedRole}`);
+  assert.equal(classifyTypeFromProbe('single_select', probe).matches, false);
+  assert.equal(classifyTypeFromProbe('text', probe).matches, false);
+});

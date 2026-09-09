@@ -919,7 +919,17 @@ export class Orchestrator {
         ],
         phase: 'binding',
       }, /* blocking */ true);
-      return;
+      // Human Change-type installs a binding; continue and place rather than
+      // abandoning the field (live: override collapsed the card and left
+      // Demographics empty while the run looked stopped).
+      typeBinding = this.typeBindings[field.canonical_type];
+      if (!typeBinding) return;
+      const rec = this.runState.items[itemKey];
+      if (rec && rec.state === 'escalated') {
+        rec.state = 'pending';
+        rec.rebind_count = 0;
+        delete rec.escalation_reason;
+      }
     }
 
     // Execute the binding recipe (click the palette button).
@@ -2424,8 +2434,24 @@ export class Orchestrator {
       return null;
     }
 
+    // Blocking waits can sit for minutes with no tab traffic. MV3 will still
+    // kill an "idle" worker even while this Promise is outstanding; touch
+    // extension state on an interval so keep-alive stays honest for the whole
+    // gate, not just while the sidepanel port happens to be connected.
     const decision = await new Promise<HumanDecision>((resolve) => {
-      this.escalationQueue.set(itemKey, { resolve });
+      const pulse = setInterval(() => {
+        try {
+          void chrome.storage?.session?.set({ keepaliveTick: Date.now() });
+        } catch {
+          // chrome may be unavailable in unit tests
+        }
+      }, 20000);
+      this.escalationQueue.set(itemKey, {
+        resolve: (d: HumanDecision) => {
+          clearInterval(pulse);
+          resolve(d);
+        },
+      });
     });
 
     this.journal.escalated(source, escalation.reason, {
@@ -2450,10 +2476,18 @@ export class Orchestrator {
     } else if (decision.action === 'override' && decision.overrideType) {
       const field = this.irFieldMap.get(this.runState.items[itemKey]?.field_id ?? '');
       if (field) {
-        const newBinding = bindFieldAdd(
-          (await this.driver.perceive()).observation,
-          decision.overrideType,
-        );
+        const target = decision.overrideType;
+        const { observation } = await this.driver.perceive();
+        // Name synonyms miss hostile palette labels ("Dial Group", "Solar Mark");
+        // fall back to place-and-inspect so Change-type still installs a binding.
+        let newBinding = bindFieldAdd(observation, target);
+        if (!newBinding) {
+          const probed = await this.probeRunner.probePalette(observation);
+          for (const [t, b] of Object.entries(probed.bindings)) {
+            if (b) this.typeBindings[t as CanonicalType] = this.typeBindings[t as CanonicalType] ?? b;
+          }
+          newBinding = this.typeBindings[target] ?? probed.bindings[target] ?? null;
+        }
         if (newBinding) {
           this.typeBindings[field.canonical_type] = newBinding;
         }

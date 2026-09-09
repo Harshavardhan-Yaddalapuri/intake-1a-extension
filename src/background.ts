@@ -58,15 +58,26 @@ async function startRunKeepAlive(): Promise<void> {
   await chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 1 });
 }
 
-async function stopRunKeepAlive(): Promise<void> {
-  await chrome.alarms.clear(KEEPALIVE_ALARM);
-}
-
 // ---------------------------------------------------------------------------
 // Orchestrator state.
 // ---------------------------------------------------------------------------
 
 let orchestrator: Orchestrator | null = null;
+
+async function stopRunKeepAlive(): Promise<void> {
+  // Do not clear while a run is still parked on a blocking human gate — the
+  // execute() Promise is outstanding and Chrome will otherwise idle-kill the
+  // worker, dropping the gate and the in-memory orchestrator together.
+  if (orchestrator) {
+    const phase = orchestrator.getPhase();
+    const waiting = orchestrator.getEscalationQueue().some((e) => e.blocking);
+    if (phase === 'executing' || phase === 'paused' || waiting) {
+      await chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 1 });
+      return;
+    }
+  }
+  await chrome.alarms.clear(KEEPALIVE_ALARM);
+}
 
 /** Broadcast a message to all extension contexts (side panel, popup, etc.). */
 function broadcast(message: Record<string, unknown>): void {
