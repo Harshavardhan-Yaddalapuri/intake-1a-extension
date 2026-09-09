@@ -99,6 +99,29 @@ export function orderChoiceDeepenCandidates<T extends { name: string }>(
   ];
 }
 
+
+/**
+ * Palette probes must not leave the designer. On env-swapped-controls the
+ * largest control cluster includes the builder chrome ("<- Screening", Lock,
+ * Deploy); clicking the back control exits the builder and every later tile
+ * probe sees the visit screen, so date (and most types) stay unbound.
+ */
+export function isSafePaletteProbeCandidate(name: string): boolean {
+  const n = (name || '').trim().toLowerCase();
+  if (!n) return false;
+  if (n.startsWith('<-') || n.startsWith('←')) return false;
+  if (n === 'back' || n.startsWith('back ') || n.endsWith(' back')) return false;
+  // Persist / preview / deploy chrome — placing is not their job.
+  if (
+    n === 'preview' || n === 'deploy' || n === 'stash' || n === 'lock'
+    || n === 'freeze' || n === 'bank it' || n === 'save' || n === 'activate'
+    || n === 'publish' || n === 'done' || n === 'create'
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export class ProbeRunner {
   private driver: TabDriver;
 
@@ -144,8 +167,17 @@ export class ProbeRunner {
     const rest = ranked.filter((r) => !inRegion.includes(r));
     const MAX_PALETTE_TRIALS = 40;
     const candidateButtons = [...inRegion, ...rest]
-      .slice(0, MAX_PALETTE_TRIALS)
-      .map((r) => r.el);
+      .map((r) => r.el)
+      .filter((el) => isSafePaletteProbeCandidate(el.name))
+      .slice(0, MAX_PALETTE_TRIALS);
+
+    // Fingerprint: designer chrome that must survive a palette click. Losing
+    // it means we navigated away and must stop probing.
+    const designerFingerprint = new Set(
+      allActionable
+        .map((e) => (e.name || '').trim().toLowerCase())
+        .filter((n) => /^(lock|freeze|preview|deploy|stash|bank it)$/.test(n)),
+    );
 
     for (const btn of candidateButtons) {
       try {
@@ -162,6 +194,19 @@ export class ProbeRunner {
         // 3. Snapshot after click
         const after = await this.driver.perceiveAfterSettle(200);
 
+        if (designerFingerprint.size > 0) {
+          const afterNames = new Set(
+            enumerateActionable(after.observation).map((e) => (e.name || '').trim().toLowerCase()),
+          );
+          const stillInDesigner = [...designerFingerprint].some((n) => afterNames.has(n));
+          if (!stillInDesigner) {
+            console.warn(
+              `[ProbeRunner] Aborting palette probe after "${btn.name}": left the form designer`,
+            );
+            break;
+          }
+        }
+
         // 4. Inspect the placed control from the diff. A choice control that
         //    arrived empty is roleless, so give it values and look again.
         let observed = after.observation;
@@ -170,8 +215,9 @@ export class ProbeRunner {
           observed = await this.deepenChoiceProbe(before.observation, observed);
           probe = inspectPlacedControl(before.observation, observed);
         }
-        if (probe.observedRole === 'none') {
-          // Nothing appeared on canvas -- not an element creator
+        if (probe.observedRole === 'none' && !probe.declaredCanonical) {
+          // Nothing appeared on canvas -- not an element creator.
+          // Exception: type picker declared a canonical type (empty date tile).
           continue;
         }
 
@@ -193,9 +239,17 @@ export class ProbeRunner {
           });
 
           for (const m of matches) {
-            // If not yet bound or if this is a more specific match, bind it
-            if (!bindings[m]) {
-              bindings[m] = makeTypeBinding(m, probe, btn.name, btn.handle);
+            // Prefer a probe that matches fewer types (Solar Mark → [date]
+            // via type picker beats Free String → [text,date,...] via role).
+            const existing = bindings[m];
+            const specificity = matches.length;
+            const prevSpec = existing
+              ? Number((existing.evidence.find((e) => e.startsWith('probe-specificity:')) || 'probe-specificity:99').split(':')[1])
+              : 99;
+            if (!existing || specificity < prevSpec) {
+              const binding = makeTypeBinding(m, probe, btn.name, btn.handle);
+              binding.evidence = [`probe-specificity:${specificity}`, ...binding.evidence];
+              bindings[m] = binding;
             }
           }
         }
@@ -291,7 +345,9 @@ export class ProbeRunner {
       observed = await this.deepenChoiceProbe(before.observation, observed);
       probe = inspectPlacedControl(before.observation, observed);
     }
-    if (probe.observedRole === 'none') return { probe, matchedTypes: [] };
+    if (probe.observedRole === 'none' && !probe.declaredCanonical) {
+      return { probe, matchedTypes: [] };
+    }
 
     const matchedTypes = CANONICAL_TYPES.filter(
       (t) => classifyTypeFromProbe(t, probe).matches,

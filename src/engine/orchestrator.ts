@@ -83,6 +83,7 @@ import {
   surfaceShowsForm,
   rankAscendCandidates,
   atVisitList,
+  atVisitDetail,
 } from '../bind/rung0';
 import { Journal, type IrSource } from './journal';
 import { rankWithLlm } from '../bind/rung2';
@@ -1729,8 +1730,11 @@ export class Orchestrator {
       await this.driver.click(link.handle);
       await this.sleep(500);
       const { observation: after } = await this.driver.perceiveAfterSettle(250);
-      // We have descended out of the visit list into this visit's contents.
-      opened = !atVisitList(after, visitNames, createControl);
+      // Prefer positive structural proof (form-create control on the visit
+      // detail) over negating atVisitList — inert "Phases" chrome made the
+      // negation unreliable and blocked Screening after the create-control fix.
+      opened = atVisitDetail(after, visit.name)
+        || !atVisitList(after, visitNames, createControl);
     }
 
     if (!opened) {

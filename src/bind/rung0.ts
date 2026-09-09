@@ -415,12 +415,22 @@ export function rankAscendCandidates(
   const known = contextNames.map(normaliseText).filter(Boolean);
 
   return rankCandidates(safe, { hint: 'visit_list' })
-    .map((r) => ({
-      el: r.el,
-      score: r.score + (known.some((n) => normaliseText(r.el.name).includes(n))
-        ? ASCEND_PARENT_NAME_BONUS
-        : 0),
-    }))
+    .map((r) => {
+      let score = r.score;
+      const name = normaliseText(r.el.name);
+      if (known.some((n) => name.includes(n))) score += ASCEND_PARENT_NAME_BONUS;
+      // Breadcrumb / back controls actually move; inert tabs named "Phases"
+      // match visit_list lexically and do nothing (env-rosetta toolbar).
+      if (name.includes('back') || name.startsWith('<-') || name.startsWith('←')) {
+        score += ASCEND_PARENT_NAME_BONUS;
+      } else if (
+        name === 'phases' || name === 'sites' || name === 'data entry'
+        || name === 'trial roadmap' || name === 'study plan'
+      ) {
+        score -= ASCEND_PARENT_NAME_BONUS;
+      }
+      return { el: r.el, score };
+    })
     .sort((a, b) => b.score - a.score)
     .map((x) => x.el);
 }
@@ -464,6 +474,40 @@ export function atVisitList(
   const create = createControlName ? normaliseText(createControlName) : '';
   if (!create || !looksLikeCreateControl(createControlName!)) return false;
   return actionable.some((e) => normaliseText(e.name) === create);
+}
+
+/**
+ * Positive read-back for "am I inside a visit's form list?"
+ *
+ * Negating atVisitList is not enough on hostile chrome: inert tabs named
+ * "Phases" do not move, and a failed open left the run blocked on Screening
+ * even after the Phases/create-control fix. A visit detail screen exposes a
+ * form-create control ("+ New Record Sheet", "+ New Instrument") that the
+ * visit list does not.
+ */
+export function atVisitDetail(
+  obs: Observation,
+  visitName?: string,
+): boolean {
+  const actionable = enumerateActionable(obs);
+  const hasFormCreate = actionable.some((e) => {
+    const n = normaliseText(e.name);
+    if (!n) return false;
+    // Must look like create AND mention a form-ish noun (not visit/phase).
+    if (!(n.includes('+') || /(?:^|\s)(add|new|create)(?:\s|$)/.test(n))) return false;
+    if (/(?:^|\s)(visit|phase|cycle|timepoint|event)(?:\s|$)/.test(n)) return false;
+    return /(?:^|\s)(form|sheet|record|instrument|document|crf|source)(?:\s|$)/.test(n)
+      || n.includes('record sheet')
+      || n.includes('instrument');
+  });
+  if (!hasFormCreate) return false;
+  if (!visitName) return true;
+  // Soft corroboration: visit name appears somewhere on the surface (heading /
+  // breadcrumb text is fine — enumerateActionable excludes headings, so scan
+  // all elements).
+  const target = normaliseText(visitName);
+  if (!target) return true;
+  return obs.elements.some((e) => normaliseText(`${e.name} ${e.groupText ?? ''}`).includes(target));
 }
 
 /**

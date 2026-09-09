@@ -50,7 +50,7 @@ export type HintKey =
  *  may NEVER remove a candidate from the pool. Words are deliberately generic
  *  and multi-lingual-ish in spirit: they are guesses, not knowledge. */
 export const LEXICAL_HINTS: Record<HintKey, readonly string[]> = {
-  commit: ['save', 'commit', 'persist', 'apply', 'publish', 'submit', 'confirm', 'lock', 'finish', 'done', 'ok'],
+  commit: ['save', 'commit', 'persist', 'apply', 'publish', 'submit', 'confirm', 'lock', 'freeze', 'create', 'finish', 'done', 'ok'],
   discard: ['cancel', 'discard', 'close', 'back', 'abandon', 'revert', 'undo'],
   palette: ['element', 'library', 'palette', 'control', 'widget', 'component', 'field', 'question', 'item'],
   visit_create: ['visit', 'phase', 'timepoint', 'event', 'add', 'new', 'create', '+'],

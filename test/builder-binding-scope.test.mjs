@@ -107,9 +107,17 @@ test('the whitelist is load-bearing on env-rosetta too, not just the supplied mo
     create.recipe[0]?.evidence_name, '+ Add Visit',
     'it is emphatically not the real create control',
   );
+  // looksLikeCreateControl now rejects inert "Phases", so THAT particular
+  // poison no longer fools atVisitList. The remaining load-bearing case is
+  // "+ Page" (present on the designer): it looks like a create control and
+  // would make the builder read as the visit list if visit.create rebound to it.
   assert.equal(
-    atVisitList(obs, VISITS, create.recipe[0]?.evidence_name), true,
-    'and it makes the builder read as the visit list -- the same false positive, different words',
+    atVisitList(obs, VISITS, 'Phases'), false,
+    'inert Phases chrome must not witness the visit list',
+  );
+  assert.equal(
+    atVisitList(obs, VISITS, '+ Page'), true,
+    '+ Page on the designer still fools atVisitList -- why the whitelist remains',
   );
   for (const op of FOREIGN_OPS) {
     assert.ok(!BUILDER_OWNED.includes(op), `${op} must stay out of the builder whitelist`);
