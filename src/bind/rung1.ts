@@ -173,13 +173,21 @@ export function inspectPlacedControl(
   const canvasControls = addedElements.filter((e) => !isPropertyEditorControl(e));
   const panelControls = addedElements.filter((e) => isPropertyEditorControl(e));
 
+  // Prefer NAMED canvas controls. Required/Hidden checkboxes in hostile envs
+  // often have empty accessible names (label[for] points at a missing id), so
+  // they survive the property_editor name filter and look like the placed
+  // field. Reading them made empty Dial Group / Beam Pick look like
+  // checkbox+optionsEditor (= multi_select), and radio never bound.
+  const namedCanvas = canvasControls.filter((e) => (e.name || '').trim() !== '');
+  const canvasForPlace = namedCanvas.length > 0 ? namedCanvas : [];
+
   const DATA_ROLES = [
     'checkbox', 'radio', 'combobox', 'listbox', 'radiogroup',
     'spinbutton', 'textbox', 'switch', 'slider',
   ];
   const placedCandidate =
-    canvasControls.find((e) => DATA_ROLES.includes(e.role)) ??
-    canvasControls[0];
+    canvasForPlace.find((e) => DATA_ROLES.includes(e.role)) ??
+    canvasForPlace[0];
 
   // 2. Detect affordances.
   //
@@ -209,8 +217,8 @@ export function inspectPlacedControl(
   const hasDatePickerOptions = namesSuggestIn(panelControls, 'date_options');
 
 
-  // Find placed control from canvas controls, or fallback to addedElements
-  let placedControl = canvasControls.find(
+  // Find placed control from named canvas controls only (see canvasForPlace).
+  let placedControl = canvasForPlace.find(
     (e) =>
       e.role === 'checkbox' ||
       e.role === 'radio' ||
@@ -223,8 +231,8 @@ export function inspectPlacedControl(
       e.role === 'button',
   );
 
-  if (!placedControl && canvasControls.length > 0) {
-    placedControl = canvasControls[0];
+  if (!placedControl && canvasForPlace.length > 0) {
+    placedControl = canvasForPlace[0];
   }
 
   // NEVER fall back to the property panel. An empty choice control adds no

@@ -71,6 +71,34 @@ function needsChoiceDeepen(probe: ProbeResult): boolean {
   return true;
 }
 
+
+/** Order coded_values-ranked panel actions for empty-choice deepen.
+ *
+ *  Bulk paste-apply buttons outrank row-add buttons on raw lexical score, but
+ *  they are no-ops when the paste box is empty. Prefer add-row first so deepen
+ *  actually materialises options (and thus radio vs dropdown structure).
+ */
+export function orderChoiceDeepenCandidates<T extends { name: string }>(
+  ranked: readonly T[],
+): T[] {
+  const isPasteApply = (name: string) => {
+    const n = name.toLowerCase();
+    return (n.includes('apply') || n.includes('append')) && n.includes('paste');
+  };
+  const isAddRow = (name: string) => {
+    const n = name.toLowerCase();
+    return n.includes('add') && (
+      n.includes('value') || n.includes('choice') || n.includes('option') ||
+      n.includes('item') || n.includes('row')
+    );
+  };
+  return [
+    ...ranked.filter((r) => isAddRow(r.name)),
+    ...ranked.filter((r) => !isAddRow(r.name) && !isPasteApply(r.name)),
+    ...ranked.filter((r) => isPasteApply(r.name)),
+  ];
+}
+
 export class ProbeRunner {
   private driver: TabDriver;
 
@@ -202,21 +230,35 @@ export class ProbeRunner {
     const panelActions = enumerateActions(afterPlace).filter((e) => appeared.has(e.handle));
     if (panelActions.length === 0) return afterPlace;
 
-    const addValue = rankCandidates(panelActions, { hint: 'coded_values' })[0]?.el;
-    if (!addValue) return afterPlace;
+    // Rank by coded_values hints, but do NOT trust the top hit blindly.
+    // "Apply Pasted Values" / "Append Pasted Choices" outrank "+ Add Value" /
+    // "+ Add Choice" (they match paste+value/choice), yet with an empty paste
+    // box they are no-ops. The previous loop clicked the winner once, saw no
+    // diff, and aborted — so Dial Group / Beam Pick never gained options,
+    // never revealed role=radio, and radio stayed unbound → human type-gate.
+    const ranked = rankCandidates(panelActions, { hint: 'coded_values' });
+    if (ranked.length === 0) return afterPlace;
+
+    const ordered = orderChoiceDeepenCandidates(ranked.map((r) => r.el));
 
     let current = afterPlace;
-    for (let i = 0; i < 2; i += 1) {
-      const before = current;
-      const target = current.elements.find((e) => e.handle === addValue.handle) ? addValue.handle : null;
-      if (!target) break;
-      const res = await this.driver.click(target);
-      if (!res.ok) break;
-      await this.sleep(200);
-      current = (await this.driver.perceiveAfterSettle(150)).observation;
-      // If the click added nothing, it was not the add-value control; stop
-      // rather than clicking it repeatedly.
-      if (diffObservations(before, current).added.length === 0) break;
+    for (const candidate of ordered) {
+      let progressed = false;
+      for (let i = 0; i < 2; i += 1) {
+        const before = current;
+        const target = current.elements.find((e) => e.handle === candidate.handle)
+          ? candidate.handle
+          : null;
+        if (!target) break;
+        const res = await this.driver.click(target);
+        if (!res.ok) break;
+        await this.sleep(200);
+        current = (await this.driver.perceiveAfterSettle(150)).observation;
+        if (diffObservations(before, current).added.length === 0) break;
+        progressed = true;
+      }
+      if (progressed) return current;
+      // No-op candidate (e.g. Apply Pasted with empty box) — try the next one.
     }
     return current;
   }
