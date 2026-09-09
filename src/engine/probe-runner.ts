@@ -44,6 +44,19 @@ export interface DiscoveredPaletteItem {
   matchedTypes: CanonicalType[];
 }
 
+
+/** True when a place-and-inspect result cannot yet distinguish choice types.
+ *
+ *  An empty radio/multi_select renders no options; the property panel's
+ *  Required checkbox (often unnamed) then wins the diff and looks like a
+ *  multi_select. Deepening by adding values reveals the real control.
+ */
+function needsChoiceDeepen(probe: ProbeResult): boolean {
+  if (probe.observedRole === 'generic' || probe.observedRole === 'none') return true;
+  if (probe.observedOptions.length > 0) return false;
+  return probe.observedRole === 'checkbox' || probe.observedRole === 'button';
+}
+
 export class ProbeRunner {
   private driver: TabDriver;
 
@@ -111,7 +124,7 @@ export class ProbeRunner {
         //    arrived empty is roleless, so give it values and look again.
         let observed = after.observation;
         let probe = inspectPlacedControl(before.observation, observed);
-        if (probe.hasOptionsEditor && (probe.observedRole === 'generic' || probe.observedRole === 'none')) {
+        if (probe.hasOptionsEditor && needsChoiceDeepen(probe)) {
           observed = await this.deepenChoiceProbe(before.observation, observed);
           probe = inspectPlacedControl(before.observation, observed);
         }
@@ -218,7 +231,7 @@ export class ProbeRunner {
 
     let observed = after.observation;
     let probe = inspectPlacedControl(before.observation, observed);
-    if (probe.hasOptionsEditor && (probe.observedRole === 'generic' || probe.observedRole === 'none')) {
+    if (probe.hasOptionsEditor && needsChoiceDeepen(probe)) {
       observed = await this.deepenChoiceProbe(before.observation, observed);
       probe = inspectPlacedControl(before.observation, observed);
     }

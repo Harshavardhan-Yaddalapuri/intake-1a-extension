@@ -108,3 +108,64 @@ test('a textbox type is readable immediately, so it must NOT defer', () => {
   assert.equal(classifyTypeFromProbe('text', probe).matches, true);
   assert.ok(probe.observedOptions.length === 0);
 });
+
+test('inverted-library: Node Type picker is not the placed choice control', () => {
+  // env-swapped-controls labels the type select "Node Type" (not "Element Type").
+  // Leaving it in the canvas pool made empty radio/multi_select classify as
+  // single_select and poisoned palette bindings.
+  const OPTIONS_SWAPPED = `<aside class="options"><h3>Node Properties</h3>
+<div class="row"><label for="opt-label">Label</label><input type="text" id="opt-label"></div>
+<div class="row"><label for="opt-type">Node Type</label>
+<select id="opt-type"><option>Beam Pick</option><option>Orbit List</option>
+<option>Multi Mark Grid</option><option>Flag Toggle Grid</option></select></div>
+<div class="row"><label for="opt-req">Required</label><input type="checkbox" id="opt-req"></div>
+<fieldset><legend>Choices</legend><button type="button">+ Add Choice</button>
+<div class="row"><label for="opt-paste">Paste Choices (appends to list)</label>
+<textarea id="opt-paste"></textarea></div>
+<button type="button">Append Pasted Choices</button></fieldset>
+<button type="button">Delete Node</button></aside>`;
+
+  const placeSwapped = (preview) => {
+    const pre = observe(doc(screen(EXISTING, false)));
+    const post = observe(doc(
+      screen(EXISTING + card('Multi Mark Grid', 'Multi Mark Grid', preview), false)
+        .replace('</main>', `</main>${OPTIONS_SWAPPED}`),
+    ));
+    return inspectPlacedControl(pre, post);
+  };
+
+  const empty = placeSwapped(choicePrev('checkbox', 'Meds', []));
+  assert.notEqual(
+    empty.observedRole, 'combobox',
+    `Node Type must not be read as the placed field; got ${empty.evidence[0]}`,
+  );
+  assert.equal(
+    classifyTypeFromProbe('single_select', empty).matches, false,
+    'empty multi_select must not classify as single_select via the type picker',
+  );
+
+  const filled = placeSwapped(choicePrev('checkbox', 'Meds', ['A', 'B']));
+  assert.equal(classifyTypeFromProbe('multi_select', filled).matches, true);
+  assert.equal(classifyTypeFromProbe('single_select', filled).matches, false);
+});
+
+test('inverted-library: Beam Pick radio with values is not a dropdown', () => {
+  const OPTIONS_SWAPPED = `<aside class="options"><h3>Node Properties</h3>
+<div class="row"><label for="opt-label">Label</label><input type="text" id="opt-label"></div>
+<div class="row"><label for="opt-type">Node Type</label>
+<select id="opt-type"><option>Beam Pick</option><option>Orbit List</option></select></div>
+<div class="row"><label for="opt-req">Required</label><input type="checkbox" id="opt-req"></div>
+<fieldset><legend>Choices</legend><button type="button">+ Add Choice</button></fieldset>
+<button type="button">Delete Node</button></aside>`;
+
+  const pre = observe(doc(screen(EXISTING, false)));
+  const post = observe(doc(
+    screen(
+      EXISTING + card('Beam Pick', 'Beam Pick', choicePrev('radio', 'Sex', ['F', 'M'])),
+      false,
+    ).replace('</main>', `</main>${OPTIONS_SWAPPED}`),
+  ));
+  const probe = inspectPlacedControl(pre, post);
+  assert.equal(classifyTypeFromProbe('radio', probe).matches, true, `role=${probe.observedRole}`);
+  assert.equal(classifyTypeFromProbe('single_select', probe).matches, false);
+});

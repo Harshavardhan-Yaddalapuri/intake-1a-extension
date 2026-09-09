@@ -64,9 +64,15 @@ export const LEXICAL_HINTS: Record<HintKey, readonly string[]> = {
   visit_list: ['visit', 'schedule', 'phase', 'timeline', 'list'],
   name_input: ['name', 'label', 'title', 'identifier', 'id', 'caption'],
   property_editor: [
-    'label', 'element type', 'visibility', 'delete', 'required', 'hidden',
-    'add value', 'paste values', 'apply pasted', 'minimum', 'maximum', 'units',
-    'decimal places', 'formula', 'allow past', 'allow future',
+    // 'type' covers both "Element Type" and "Node Type" (and similar): without
+    // it, an empty choice control's type-picker combobox is read as the placed
+    // field and classified as single_select -- the inverted-library trap.
+    // Bare 'choice' is NOT listed: it matches canvas labels like "Multi Choice
+    // Box" and would hide the placed control itself.
+    'label', 'element type', 'type', 'visibility', 'delete', 'required', 'hidden',
+    'add value', 'add choice', 'paste values', 'paste choices', 'apply pasted',
+    'append pasted', 'minimum', 'maximum', 'units', 'decimal places', 'formula',
+    'allow past', 'allow future',
   ],
   decimals: ['decimal', 'precision', 'places'],
   formula: ['formula', 'expression', 'calculation', 'derived'],
@@ -261,7 +267,13 @@ export function rankCandidates(
     const signals: RankSignal[] = [];
     const lower = el.name.toLowerCase();
 
+    // Count EVERY matching hint word, not just the first. A create control
+    // named "+ New Phase" answers visit_create on three cues (phase, new, +)
+    // where a nav tab named "Phases" answers on one; stopping at the first hit
+    // tied them and DOM order handed the binding to the inert tab, so live
+    // visit.create became a no-op and atVisitList stayed true on every screen.
     const trimmed = lower.trim();
+    let exactHit = false;
     for (const word of hints) {
       if (trimmed === word) {
         signals.push({
@@ -269,7 +281,8 @@ export function rankCandidates(
           weight: WEIGHT.lexicalExact,
           detail: `name is exactly "${word}"`,
         });
-        break;
+        exactHit = true;
+        continue;
       }
       if (lower.includes(word)) {
         signals.push({
@@ -277,8 +290,14 @@ export function rankCandidates(
           weight: WEIGHT.lexical,
           detail: `name contains "${word}" (weak hint only)`,
         });
-        break;
       }
+    }
+    // Exact already scored the whole name; do not also pile substring hits for
+    // the same control (e.g. name "save" matching commit's "save" twice).
+    if (exactHit) {
+      const kept = signals.filter((s) => s.name !== 'lexical');
+      signals.length = 0;
+      signals.push(...kept);
     }
 
     for (const decoyHint of options.demote ?? []) {

@@ -434,7 +434,21 @@ export function rankAscendCandidates(
  * exists there are no such names, so the control that pre-flight bound to
  * `visit.create` is accepted as the second witness: it is present on the visit
  * list and nowhere else. Used here as evidence, not as an action.
+ *
+ * A create-control witness must look like a create action, not like chrome.
+ *
+ * Live on Zephyr (env-rosetta): visit.create bound to the inert toolbar tab
+ * "Phases" (tied with "+ New Phase" on a single hint hit). "Phases" is present
+ * on every screen, so treating it as proof of the visit list made
+ * atVisitList always true, createVisit clicked a no-op, and no visits appeared.
  */
+function looksLikeCreateControl(name: string): boolean {
+  const n = normaliseText(name);
+  if (!n) return false;
+  if (n.includes('+')) return true;
+  return /(?:^|\s)(add|new|create)(?:\s|$)/.test(n);
+}
+
 export function atVisitList(
   obs: Observation,
   visitNames: readonly string[],
@@ -448,7 +462,8 @@ export function atVisitList(
   }
 
   const create = createControlName ? normaliseText(createControlName) : '';
-  return create !== '' && actionable.some((e) => normaliseText(e.name) === create);
+  if (!create || !looksLikeCreateControl(createControlName!)) return false;
+  return actionable.some((e) => normaliseText(e.name) === create);
 }
 
 /**

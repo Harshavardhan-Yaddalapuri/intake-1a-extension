@@ -26,7 +26,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { observe } from '../dist/perceive-core.mjs';
-import { rankAscendCandidates, atVisitList } from '../dist/bind-rung0.mjs';
+import { rankAscendCandidates, atVisitList, bindVisitCreate } from '../dist/bind-rung0.mjs';
 
 const VISITS = ['Screening', 'Baseline (Day 1)', 'Week 4', 'End of Treatment (Week 12)'];
 const CREATE_CONTROL = '+ Add Visit';
@@ -133,4 +133,53 @@ test('a full climb reaches the visit list in two verified hops', () => {
   }
   assert.deepEqual(hops, ['← Screening', '← Visit Schedule']);
   assert.equal(atVisitList(observe(screens[2]), VISITS, CREATE_CONTROL), true);
+});
+
+// --- env-rosetta (Zephyr) visit-nav regression ---
+// Live E2E 2026-09-09: visit.create bound to inert toolbar "Phases", atVisitList
+// stayed true on every screen, createVisit was a no-op, GT visits=[].
+
+const ROSETTA_TOP = `<div class="toolbar">
+  <button type="button">Phases</button>
+  <button type="button">Sites</button>
+  <button type="button">Data Entry</button>
+</div>`;
+
+const rosettaVisitList = (existing) => dom(`
+  ${ROSETTA_TOP}
+  <h2>Protocol Timeline</h2>
+  <table><tbody>${existing.map((v) => `<tr><td><button>${v}</button></td></tr>`).join('')}</tbody></table>
+  <button type="button" class="btn primary">+ New Phase</button>`);
+
+const rosettaVisitScreen = (visitName) => dom(`
+  ${ROSETTA_TOP}
+  <p class="breadcrumb">Protocol Timeline / ${visitName}</p>
+  <button type="button"><- Back</button>
+  <h2>${visitName} -- Record Sheets</h2>
+  <button type="button">+ New Record Sheet</button>`);
+
+test('rosetta: visit.create ranks "+ New Phase" above the inert Phases tab', () => {
+  const obs = observe(rosettaVisitList([]));
+  const binding = bindVisitCreate(obs);
+  assert.equal(binding?.recipe?.[0]?.evidence_name, '+ New Phase');
+});
+
+test('rosetta: atVisitList rejects Phases as a create-control witness', () => {
+  // Phases is on the visit detail screen too; accepting it as the create
+  // witness made every screen look like the visit list.
+  assert.equal(
+    atVisitList(observe(rosettaVisitScreen('Screening')), VISITS, 'Phases'),
+    false,
+    'inert nav chrome must not witness the visit list',
+  );
+  assert.equal(
+    atVisitList(observe(rosettaVisitList([])), VISITS, '+ New Phase'),
+    true,
+    'empty list is recognised via the real create control',
+  );
+  assert.equal(
+    atVisitList(observe(rosettaVisitScreen('Screening')), VISITS, '+ New Phase'),
+    false,
+    'visit detail is not the visit list when the create control is absent',
+  );
 });

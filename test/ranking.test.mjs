@@ -166,3 +166,21 @@ test('explainRanking reports the candidate\'s real position, not always 1st', ()
     'a probe falling through to its third candidate must not record "1st"',
   );
 });
+
+test('multi-word create labels outrank a single-word nav tab', () => {
+  // env-rosetta: "+ New Phase" vs "Phases" — both contain "phase"; only the
+  // create control also contains "new" and "+". First-match-only scoring tied
+  // them and DOM order picked the inert tab.
+  resetSeq();
+  const pool = enumerateActionable(obs([
+    elem('button', 'Phases'),
+    elem('button', 'Sites'),
+    elem('button', '+ New Phase'),
+  ]));
+  const ranked = rankCandidates(pool, { hint: 'visit_create' });
+  assert.equal(ranked[0].el.name, '+ New Phase');
+  assert.ok(
+    ranked[0].score > ranked.find((r) => r.el.name === 'Phases').score,
+    'create control must strictly outscore the nav tab',
+  );
+});
