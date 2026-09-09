@@ -106,6 +106,17 @@ export function orderChoiceDeepenCandidates<T extends { name: string }>(
  * Deploy); clicking the back control exits the builder and every later tile
  * probe sees the visit screen, so date (and most types) stay unbound.
  */
+
+/** Panel actions eligible for empty-choice deepen (added OR changed handles). */
+export function choiceDeepenPanelActions(
+  beforePlace: Observation,
+  afterPlace: Observation,
+): ReturnType<typeof enumerateActions> {
+  const diff = diffObservations(beforePlace, afterPlace);
+  const panelHandles = new Set([...diff.added, ...diff.changed]);
+  return enumerateActions(afterPlace).filter((e) => panelHandles.has(e.handle));
+}
+
 export function isSafePaletteProbeCandidate(name: string): boolean {
   const n = (name || '').trim().toLowerCase();
   if (!n) return false;
@@ -253,12 +264,39 @@ export class ProbeRunner {
             }
           }
         }
+
+        // Always try to remove the probe tile. Leaving every palette click on
+        // the canvas commits chrome names ("Derived Value", "Dial Group") as
+        // fields beside the real IR labels (Hostile E2E v5 rosetta 21-field
+        // Demographics), and reused panel handles break the next deepen.
+        await this.removePlacedProbe(observed);
       } catch (err) {
         console.warn(`[ProbeRunner] Failed probing button "${btn.name}":`, err);
       }
     }
 
     return { bindings, discovered };
+  }
+
+  /**
+   * Delete the selected probe tile from the canvas.
+   *
+   * Prefer an explicit delete-element control; never click Back/Cancel — those
+   * leave the designer and abort the rest of the palette sweep.
+   */
+  private async removePlacedProbe(obs: Observation): Promise<void> {
+    const del = enumerateActions(obs).find((e) => {
+      const n = (e.name || '').trim().toLowerCase();
+      if (!n) return false;
+      if (n.includes('delete') && /(element|node|field|control|item|widget)/.test(n)) {
+        return true;
+      }
+      return n === 'delete selected' || n === 'remove element' || n === 'remove node';
+    });
+    if (!del) return;
+    const res = await this.driver.click(del.handle);
+    if (!res.ok) return;
+    await this.sleep(150);
   }
 
   /**
@@ -280,8 +318,14 @@ export class ProbeRunner {
     beforePlace: Observation,
     afterPlace: Observation,
   ): Promise<Observation> {
-    const appeared = new Set(diffObservations(beforePlace, afterPlace).added);
-    const panelActions = enumerateActions(afterPlace).filter((e) => appeared.has(e.handle));
+    // Include CHANGED handles, not only added. Hostile panels reuse DOM paths
+    // across element types: after placing Logic Expr then Beam Pick, the
+    // "+ Add Choice" button keeps the prior "Expression" handle, so an
+    // added-only filter saw only "Append Pasted Choices", deepen no-op'd, and
+    // radio never bound (Hostile E2E v5 swapped Sex at Birth gate).
+    const diff = diffObservations(beforePlace, afterPlace);
+    const panelHandles = new Set([...diff.added, ...diff.changed]);
+    const panelActions = enumerateActions(afterPlace).filter((e) => panelHandles.has(e.handle));
     if (panelActions.length === 0) return afterPlace;
 
     // Rank by coded_values hints, but do NOT trust the top hit blindly.
@@ -352,6 +396,7 @@ export class ProbeRunner {
     const matchedTypes = CANONICAL_TYPES.filter(
       (t) => classifyTypeFromProbe(t, probe).matches,
     );
+    await this.removePlacedProbe(observed);
     return { probe, matchedTypes };
   }
 

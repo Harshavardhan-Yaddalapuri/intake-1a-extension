@@ -417,6 +417,19 @@ export function classifyTypeFromProbe(
   }
 
   if (canonical === 'multi_select') {
+    // Empty single-choice tiles declare radio/single_select in the type picker
+    // but have no canvas role until deepen. The vacuous hasOptionsEditor branch
+    // must not claim them as multi_select — that stole Beam Pick from radio
+    // after a prior probe left deepen without "+ Add Choice" (E2E v5 swapped).
+    if (
+      probe.declaredCanonical === 'radio'
+      || probe.declaredCanonical === 'single_select'
+    ) {
+      return {
+        matches: false,
+        evidence: `multi_select: type picker declares "${probe.declaredCanonical}"`,
+      };
+    }
     if (
       probe.observedRole === 'listbox' ||
       (probe.observedRole === 'checkbox' && probe.hasOptionsEditor) ||

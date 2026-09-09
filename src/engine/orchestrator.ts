@@ -1662,6 +1662,19 @@ export class Orchestrator {
     const visitNames = [...this.irVisitMap.values()].map((v) => v.name);
     const createControl = this.bindings['visit.create']?.recipe?.[0]?.evidence_name;
 
+    // Already on this visit's form list (e.g. just left its designer via
+    // breadcrumb). Re-climbing to the schedule and re-clicking the visit is
+    // unnecessary — and hostile ascend ranking used to fail that climb, so
+    // Screening escalated as "could not open" after Demographics was built.
+    {
+      const { observation: here } = await this.driver.perceive();
+      if (atVisitDetail(here, visit.name)) {
+        this.currentVisitId = visitId;
+        this.currentFormId = null;
+        return true;
+      }
+    }
+
     // Climb to the visit list, CONFIRMING arrival instead of assuming it.
     // A single pre-bound "go to study root" click cannot do this job: on the
     // supplied mock that control is the already-active nav tab and is inert at

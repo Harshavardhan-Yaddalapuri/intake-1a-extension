@@ -23,7 +23,7 @@ import { observe, diffObservations } from '../dist/perceive-core.mjs';
 import { inspectPlacedControl, classifyTypeFromProbe } from '../dist/bind-rung1.mjs';
 import { bindFieldAdd } from '../dist/bind-rung0.mjs';
 import { enumerateActions, rankCandidates } from '../dist/bind-ranking.mjs';
-import { orderChoiceDeepenCandidates } from '../dist/probe-runner.mjs';
+import { orderChoiceDeepenCandidates, choiceDeepenPanelActions } from '../dist/probe-runner.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const gen = join(__dirname, '..', 'generalization');
@@ -57,8 +57,7 @@ function openDemographics(w) {
 }
 
 function deepenLikeProbeRunner(w, before, after) {
-  const appeared = new Set(diffObservations(before, after).added);
-  const panelActions = enumerateActions(after).filter((e) => appeared.has(e.handle));
+  const panelActions = choiceDeepenPanelActions(before, after);
   const ranked = rankCandidates(panelActions, { hint: 'coded_values' }).map((r) => r.el);
   const ordered = orderChoiceDeepenCandidates(ranked);
   let current = after;
@@ -114,8 +113,7 @@ for (const env of [
     w.document.querySelector(env.radioSel).click();
     const after = observe(w.document);
 
-    const appeared = new Set(diffObservations(before, after).added);
-    const panelActions = enumerateActions(after).filter((e) => appeared.has(e.handle));
+    const panelActions = choiceDeepenPanelActions(before, after);
     const rawRanked = rankCandidates(panelActions, { hint: 'coded_values' }).map((r) => r.el.name);
     // Document the trap: raw lexical rank puts paste-apply first.
     assert.ok(

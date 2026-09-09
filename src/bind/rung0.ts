@@ -407,9 +407,19 @@ export function rankAscendCandidates(
 
   // Structural exclusion: the palette is a cluster of sibling controls.
   // Removing it by shape is legitimate; removing it by name would not be.
+  //
+  // Keep breadcrumb/back controls even when they sit in the largest cluster.
+  // On a visit detail screen that cluster is toolbar chrome (Phases / Sites /
+  // <- Back / + New Record Sheet); excluding Back left only Modify/Go Live/
+  // Remove, which re-entered the builder and never reached the visit list
+  // (Hostile E2E v5 Screening "could not open this visit" after Demographics).
   const cluster = largestControlCluster(pool);
   const excluded = new Set((cluster?.members ?? []).map((e) => e.handle));
-  const safe = pool.filter((e) => !excluded.has(e.handle));
+  const isBreadcrumb = (name: string) => {
+    const n = normaliseText(name);
+    return n.includes('back') || n.startsWith('<-') || n.startsWith('←');
+  };
+  const safe = pool.filter((e) => !excluded.has(e.handle) || isBreadcrumb(e.name));
   if (safe.length === 0) return [];
 
   const known = contextNames.map(normaliseText).filter(Boolean);
