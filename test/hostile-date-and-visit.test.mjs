@@ -108,6 +108,8 @@ test('safe palette probe rejects builder back/chrome controls', () => {
   assert.equal(isSafePaletteProbeCandidate('← Screening'), false);
   assert.equal(isSafePaletteProbeCandidate('Lock'), false);
   assert.equal(isSafePaletteProbeCandidate('Freeze'), false);
+  assert.equal(isSafePaletteProbeCandidate('Go Live'), false);
+  assert.equal(isSafePaletteProbeCandidate('Phases'), false);
   assert.equal(isSafePaletteProbeCandidate('Solar Mark'), true);
   assert.equal(isSafePaletteProbeCandidate('Calendar Day'), true);
   assert.equal(isSafePaletteProbeCandidate('Glyph Line'), true);

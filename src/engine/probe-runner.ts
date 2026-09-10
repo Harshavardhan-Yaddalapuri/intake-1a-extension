@@ -123,10 +123,20 @@ export function isSafePaletteProbeCandidate(name: string): boolean {
   if (n.startsWith('<-') || n.startsWith('←')) return false;
   if (n === 'back' || n.startsWith('back ') || n.endsWith(' back')) return false;
   // Persist / preview / deploy chrome — placing is not their job.
+  // Rosetta labels activate as "Go Live" (not "Activate"); clicking it while
+  // dirty inserts a toast that shifts every structural handle under the
+  // builder bar, so later Delete Element clicks go stale in live Chrome.
   if (
     n === 'preview' || n === 'deploy' || n === 'stash' || n === 'lock'
     || n === 'freeze' || n === 'bank it' || n === 'save' || n === 'activate'
-    || n === 'publish' || n === 'done' || n === 'create'
+    || n === 'go live' || n === 'publish' || n === 'done' || n === 'create'
+  ) {
+    return false;
+  }
+  // Top-nav and page chrome ride along in some builder clusters.
+  if (
+    n === 'phases' || n === 'sites' || n === 'data entry' || n === 'trial roadmap'
+    || n === 'page 1' || n === '+ page' || n === '+ section'
   ) {
     return false;
   }
@@ -183,8 +193,17 @@ export function findPlacedProbeSelectTarget(
     const n = (e.name || '').trim().toLowerCase();
     if (!n || isDeleteChrome(n) || isNavOrCreate(n)) return false;
     if (n === 'filter...' || n.includes('filter')) return false;
-    return prefer.has(e.role);
+    // Panel fields, not the canvas tile.
+    if (n === 'label' || n === 'formula' || n === 'expression' || n === 'visibility') {
+      return false;
+    }
+    if (prefer.has(e.role)) return true;
+    // Boolean previews only expose Yes/No (True/False) buttons — no textbox.
+    if (e.role === 'button' && /^(yes|no|true|false)$/.test(n)) return true;
+    return false;
   };
+
+  const beforeHandles = new Set(beforePlace.elements.map((e) => e.handle));
 
   let pool = afterPlace.elements.filter((e) => added.has(e.handle) && usable(e));
 
@@ -193,12 +212,43 @@ export function findPlacedProbeSelectTarget(
     pool = afterPlace.elements.filter((e) => usable(e));
   }
 
+  // Empty choice tiles (no values yet) render no textbox/radio — only the
+  // cursor:pointer card. With real CSS that card is observed as role=generic
+  // (live Chrome); include it so we can re-select and expose Delete.
+  if (pool.length === 0) {
+    pool = afterPlace.elements.filter((e) => {
+      if (e.role !== 'generic') return false;
+      if (beforeHandles.has(e.handle) && !added.has(e.handle)) return false;
+      const n = (e.name || '').trim().toLowerCase();
+      if (!n || isDeleteChrome(n) || isNavOrCreate(n)) return false;
+      if (n.includes('filter')) return false;
+      return true;
+    });
+  }
+
   if (pool.length === 0) return null;
   // Prefer a control that was not present before the place.
-  const beforeHandles = new Set(beforePlace.elements.map((e) => e.handle));
   const fresh = pool.filter((e) => !beforeHandles.has(e.handle));
   const pick = fresh[0] ?? pool[pool.length - 1];
   return { name: pick.name, handle: pick.handle };
+}
+
+/**
+ * True when a just-placed probe still appears to occupy the canvas.
+ *
+ * Observation size alone lies for empty choice tiles: deselecting drops the
+ * property panel (Delete Element/Node, Label, …) back to the pre-place size
+ * while the tile remains in builder state with no perceivable canvas preview.
+ * Live Chrome then Freezes that residue into Demographics (Hostile E2E v7
+ * rosetta: 13 palette chrome names ahead of IR labels).
+ */
+export function probeTileResiduePresent(
+  beforePlace: Observation,
+  current: Observation,
+): boolean {
+  if (findProbeDeleteAction(current)) return true;
+  if (findPlacedProbeSelectTarget(beforePlace, current)) return true;
+  return current.elements.length > beforePlace.elements.length;
 }
 
 export class ProbeRunner {
@@ -260,11 +310,17 @@ export class ProbeRunner {
 
     for (const btn of candidateButtons) {
       try {
-        // 1. Snapshot before click
+        // 1. Snapshot before click — re-resolve the tile by name. Prior
+        //    place/delete cycles replaceChildren the builder; a handle from
+        //    the opening observation can point at the wrong control once a
+        //    toast or leftover tile has shifted paths (live Chrome / rosetta).
         const before = await this.driver.perceive();
+        const liveBtn = enumerateActionable(before.observation).find(
+          (e) => (e.name || '').trim() === (btn.name || '').trim(),
+        ) ?? btn;
 
         // 2. Click the candidate palette tile
-        const clickRes = await this.driver.click(btn.handle);
+        const clickRes = await this.driver.click(liveBtn.handle);
         if (!clickRes.ok) continue;
 
         // Brief settle for DOM render
@@ -314,8 +370,8 @@ export class ProbeRunner {
 
         if (matches.length > 0) {
           discovered.push({
-            name: btn.name,
-            handle: btn.handle,
+            name: liveBtn.name,
+            handle: liveBtn.handle,
             probe,
             matchedTypes: matches,
           });
@@ -329,7 +385,7 @@ export class ProbeRunner {
               ? Number((existing.evidence.find((e) => e.startsWith('probe-specificity:')) || 'probe-specificity:99').split(':')[1])
               : 99;
             if (!existing || specificity < prevSpec) {
-              const binding = makeTypeBinding(m, probe, btn.name, btn.handle);
+              const binding = makeTypeBinding(m, probe, liveBtn.name, liveBtn.handle);
               binding.evidence = [`probe-specificity:${specificity}`, ...binding.evidence];
               bindings[m] = binding;
             }
@@ -366,12 +422,26 @@ export class ProbeRunner {
     afterPlace: Observation,
   ): Promise<void> {
     const baselineSize = beforePlace.elements.length;
+    // If the place left a selected tile, we must land a real Delete click.
+    // Size<=baseline without that click is the empty-choice false success
+    // (panel chrome gone, tile still in working copy → Freeze persists it).
+    const placedWithSelection = findProbeDeleteAction(afterPlace) !== null;
+    let deleteClicked = false;
     let current = afterPlace;
 
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
       // Fresh snapshot so delete handles match ACT_EXECUTE's re-perceive.
       current = (await this.driver.perceive()).observation;
-      if (current.elements.length <= baselineSize) return;
+      const residue = probeTileResiduePresent(beforePlace, current);
+      if (!residue) {
+        if (!placedWithSelection || deleteClicked) return;
+        // Size matched without a delete click — keep trying to surface Delete.
+      } else if (
+        current.elements.length <= baselineSize
+        && !placedWithSelection
+      ) {
+        return;
+      }
 
       let del = findProbeDeleteAction(current);
       if (!del) {
@@ -379,21 +449,44 @@ export class ProbeRunner {
         // placed tile, then look again.
         const selectable = findPlacedProbeSelectTarget(beforePlace, current);
         if (selectable) {
-          const sel = await this.driver.click(selectable.handle);
-          if (sel.ok) {
-            await this.sleep(100);
+          // Re-resolve by name right before ACT (toast / re-render shifts paths).
+          current = (await this.driver.perceive()).observation;
+          const live = findPlacedProbeSelectTarget(beforePlace, current)
+            ?? selectable;
+          const sel = await this.driver.click(live.handle);
+          if (!sel.ok) {
             current = (await this.driver.perceive()).observation;
-            del = findProbeDeleteAction(current);
+            const again = findPlacedProbeSelectTarget(beforePlace, current);
+            if (again) {
+              await this.driver.click(again.handle);
+            }
           }
+          await this.sleep(120);
+          current = (await this.driver.perceive()).observation;
+          del = findProbeDeleteAction(current);
         }
       }
       if (!del) continue;
 
-      const res = await this.driver.click(del.handle);
-      if (!res.ok) continue;
-      await this.sleep(150);
-      current = (await this.driver.perceiveAfterSettle(100)).observation;
-      if (current.elements.length <= baselineSize) return;
+      // Re-find Delete by name immediately before click — ACT_EXECUTE
+      // re-perceives, and a toast (e.g. "Freeze the sheet before going live.")
+      // between the prior snapshot and ACT makes the handle stale. Same
+      // failure mode on rosetta more than swapped: Go Live sits next to the
+      // horizontal palette and was previously a safe probe candidate.
+      current = (await this.driver.perceive()).observation;
+      del = findProbeDeleteAction(current) ?? del;
+      let res = await this.driver.click(del.handle);
+      if (!res.ok) {
+        current = (await this.driver.perceive()).observation;
+        const retry = findProbeDeleteAction(current);
+        if (!retry) continue;
+        res = await this.driver.click(retry.handle);
+        if (!res.ok) continue;
+      }
+      deleteClicked = true;
+      await this.sleep(180);
+      current = (await this.driver.perceiveAfterSettle(150)).observation;
+      if (!probeTileResiduePresent(beforePlace, current)) return;
     }
   }
 
