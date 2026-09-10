@@ -264,3 +264,49 @@ test('rosetta: toast path-shift still allows Delete Element cleanup', async () =
   assert.equal(cleaned, true);
   assert.equal(canvasCount(w), 0);
 });
+
+test('swapped: probe cleanup must not Delete already-built IR fields', async () => {
+  // Hostile v8 regression (3320b18): findPlacedProbeSelectTarget fell back to
+  // every usable() control after deselect, so removePlacedProbe re-selected
+  // Subject Initials and hit Delete Node while probing Beam Pick.
+  const w = loadEnv('env-swapped-controls');
+  openDemographics(w);
+
+  w.document.querySelector('#node-text').click();
+  w.eval(`patchSelected({ label: 'Subject Initials' })`);
+  w.eval('selectElement(null)');
+  assert.deepEqual([...canvasLabels(w)], ['Subject Initials']);
+
+  const before = observe(w.document);
+  w.document.querySelector('#node-radio').click();
+  const after = observe(w.document);
+  assert.equal(canvasCount(w), 2);
+  assert.ok(findProbeDeleteAction(after), 'Beam Pick place should expose Delete Node');
+
+  // Deselect so Delete disappears — the broken fallback then hunted IR fields.
+  w.eval('selectElement(null)');
+  const deselected = observe(w.document);
+  assert.equal(findProbeDeleteAction(deselected), null);
+
+  const selectTarget = findPlacedProbeSelectTarget(before, deselected);
+  if (selectTarget) {
+    assert.notEqual(
+      (selectTarget.name || '').trim().toLowerCase(),
+      'subject initials',
+      'select target must be the probe tile, never the prior IR field',
+    );
+  }
+
+  const cleaned = await removePlacedProbeLike(w, before, after);
+  assert.equal(cleaned, true);
+  assert.deepEqual(
+    [...canvasLabels(w)],
+    ['Subject Initials'],
+    `IR field must survive probe cleanup; got ${JSON.stringify(canvasLabels(w))}`,
+  );
+  assert.equal(
+    probeTileResiduePresent(before, observe(w.document)),
+    false,
+    'after cleanup, only pre-place IR fields remain — not probe residue',
+  );
+});

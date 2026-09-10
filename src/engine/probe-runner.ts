@@ -208,8 +208,15 @@ export function findPlacedProbeSelectTarget(
   let pool = afterPlace.elements.filter((e) => added.has(e.handle) && usable(e));
 
   // After deselect, panel chrome leaves the diff; the canvas preview remains.
+  // Restrict to handles that were NOT present before the place. Falling back
+  // to every usable() control on the page (v8) let removePlacedProbe re-select
+  // and Delete already-built IR fields — e.g. Subject Initials — while probing
+  // Beam Pick mid-Demographics, emptying the form and collapsing the live
+  // swapped score from 19.4% back to 0.37%.
   if (pool.length === 0) {
-    pool = afterPlace.elements.filter((e) => usable(e));
+    pool = afterPlace.elements.filter(
+      (e) => usable(e) && !beforeHandles.has(e.handle),
+    );
   }
 
   // Empty choice tiles (no values yet) render no textbox/radio — only the
@@ -218,7 +225,7 @@ export function findPlacedProbeSelectTarget(
   if (pool.length === 0) {
     pool = afterPlace.elements.filter((e) => {
       if (e.role !== 'generic') return false;
-      if (beforeHandles.has(e.handle) && !added.has(e.handle)) return false;
+      if (beforeHandles.has(e.handle)) return false;
       const n = (e.name || '').trim().toLowerCase();
       if (!n || isDeleteChrome(n) || isNavOrCreate(n)) return false;
       if (n.includes('filter')) return false;
