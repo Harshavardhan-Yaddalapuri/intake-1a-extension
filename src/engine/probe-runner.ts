@@ -530,20 +530,12 @@ export class ProbeRunner {
           for (const m of matches) {
             // Prefer a probe that matches fewer types (Solar Mark → [date]
             // via type picker beats Free String → [text,date,...] via role).
-            // On a tie, prefer a type-picker declaration over bare role match
-            // (FormCraft hamburger→Commit role=button was stealing boolean).
             const existing = bindings[m];
             const specificity = matches.length;
             const prevSpec = existing
               ? Number((existing.evidence.find((e) => e.startsWith('probe-specificity:')) || 'probe-specificity:99').split(':')[1])
               : 99;
-            const declaredRank = probe.declaredCanonical === m ? 0 : 1;
-            const prevDeclared = existing?.evidence.some((e) => e.includes('type picker declares')) ? 0 : 1;
-            const better =
-              !existing
-              || specificity < prevSpec
-              || (specificity === prevSpec && declaredRank < prevDeclared);
-            if (better) {
+            if (!existing || specificity < prevSpec) {
               const binding = makeTypeBinding(m, probe, liveBtn.name, liveBtn.handle, liveBtn.role);
               binding.evidence = [`probe-specificity:${specificity}`, ...binding.evidence];
               bindings[m] = binding;
