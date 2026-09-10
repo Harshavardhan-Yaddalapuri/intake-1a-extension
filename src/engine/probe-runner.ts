@@ -133,6 +133,74 @@ export function isSafePaletteProbeCandidate(name: string): boolean {
   return true;
 }
 
+
+/** Delete/remove control for a selected canvas tile. Rosetta: "Delete Element";
+ *  swapped: "Delete Node". Never Back/Cancel. */
+export function findProbeDeleteAction(obs: Observation): { name: string; handle: string } | null {
+  const del = enumerateActions(obs).find((e) => {
+    const n = (e.name || '').trim().toLowerCase();
+    if (!n) return false;
+    if (n.includes('delete') && /(element|node|field|control|item|widget)/.test(n)) {
+      return true;
+    }
+    return (
+      n === 'delete'
+      || n === 'delete selected'
+      || n === 'remove element'
+      || n === 'remove node'
+    );
+  });
+  return del ? { name: del.name, handle: del.handle } : null;
+}
+
+/**
+ * Click target that re-selects the just-placed probe tile so Delete Element /
+ * Delete Node is enabled. Prefer a named canvas control that appeared since
+ * beforePlace; fall back to any added actionable control.
+ */
+export function findPlacedProbeSelectTarget(
+  beforePlace: Observation,
+  afterPlace: Observation,
+): { name: string; handle: string } | null {
+  const diff = diffObservations(beforePlace, afterPlace);
+  const added = new Set(diff.added);
+
+  const isDeleteChrome = (n: string) =>
+    n.includes('delete') || n === 'remove' || n === 'remove element' || n === 'remove node';
+
+  const isNavOrCreate = (n: string) =>
+    n.startsWith('<-') || n.startsWith('+') || n.includes('back') || n.includes('page');
+
+  // Canvas previews are VALUE_ROLES (textbox/…) which enumerateActionable
+  // excludes — look at obs.elements directly. Never pick Delete Element/Node
+  // (it is in diff.added when the tile is selected).
+  const prefer = new Set([
+    'textbox', 'searchbox', 'combobox', 'listbox', 'checkbox', 'radio',
+    'radiogroup', 'spinbutton', 'switch',
+  ]);
+
+  const usable = (e: { name: string; role: string; handle: string }) => {
+    const n = (e.name || '').trim().toLowerCase();
+    if (!n || isDeleteChrome(n) || isNavOrCreate(n)) return false;
+    if (n === 'filter...' || n.includes('filter')) return false;
+    return prefer.has(e.role);
+  };
+
+  let pool = afterPlace.elements.filter((e) => added.has(e.handle) && usable(e));
+
+  // After deselect, panel chrome leaves the diff; the canvas preview remains.
+  if (pool.length === 0) {
+    pool = afterPlace.elements.filter((e) => usable(e));
+  }
+
+  if (pool.length === 0) return null;
+  // Prefer a control that was not present before the place.
+  const beforeHandles = new Set(beforePlace.elements.map((e) => e.handle));
+  const fresh = pool.filter((e) => !beforeHandles.has(e.handle));
+  const pick = fresh[0] ?? pool[pool.length - 1];
+  return { name: pick.name, handle: pick.handle };
+}
+
 export class ProbeRunner {
   private driver: TabDriver;
 
@@ -227,8 +295,11 @@ export class ProbeRunner {
           probe = inspectPlacedControl(before.observation, observed);
         }
         if (probe.observedRole === 'none' && !probe.declaredCanonical) {
-          // Nothing appeared on canvas -- not an element creator.
-          // Exception: type picker declared a canonical type (empty date tile).
+          // Nothing useful appeared -- but a tile may still have landed (empty
+          // choice / nameless canvas). Clean it up before skipping.
+          if (diffObservations(before.observation, observed).added.length > 0) {
+            await this.removePlacedProbe(before.observation, observed);
+          }
           continue;
         }
 
@@ -269,7 +340,7 @@ export class ProbeRunner {
         // the canvas commits chrome names ("Derived Value", "Dial Group") as
         // fields beside the real IR labels (Hostile E2E v5 rosetta 21-field
         // Demographics), and reused panel handles break the next deepen.
-        await this.removePlacedProbe(observed);
+        await this.removePlacedProbe(before.observation, observed);
       } catch (err) {
         console.warn(`[ProbeRunner] Failed probing button "${btn.name}":`, err);
       }
@@ -281,22 +352,49 @@ export class ProbeRunner {
   /**
    * Delete the selected probe tile from the canvas.
    *
-   * Prefer an explicit delete-element control; never click Back/Cancel — those
-   * leave the designer and abort the rest of the palette sweep.
+   * Hostile builders expose "Delete Element" (rosetta) or "Delete Node"
+   * (swapped). A single click on a stale observation handle is not enough:
+   * deepen re-renders the panel, selection can be lost, and ACT re-perceives
+   * before clicking — so a silent ok:false left every palette name on the
+   * canvas (Hostile E2E v6 rosetta Demographics = 13 chrome + IR labels).
+   *
+   * Reliable cleanup: re-perceive, select the just-placed control, click
+   * delete, verify the observation shrank, retry.
    */
-  private async removePlacedProbe(obs: Observation): Promise<void> {
-    const del = enumerateActions(obs).find((e) => {
-      const n = (e.name || '').trim().toLowerCase();
-      if (!n) return false;
-      if (n.includes('delete') && /(element|node|field|control|item|widget)/.test(n)) {
-        return true;
+  private async removePlacedProbe(
+    beforePlace: Observation,
+    afterPlace: Observation,
+  ): Promise<void> {
+    const baselineSize = beforePlace.elements.length;
+    let current = afterPlace;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      // Fresh snapshot so delete handles match ACT_EXECUTE's re-perceive.
+      current = (await this.driver.perceive()).observation;
+      if (current.elements.length <= baselineSize) return;
+
+      let del = findProbeDeleteAction(current);
+      if (!del) {
+        // Selection lost → panel hides Delete Element/Node. Re-select the
+        // placed tile, then look again.
+        const selectable = findPlacedProbeSelectTarget(beforePlace, current);
+        if (selectable) {
+          const sel = await this.driver.click(selectable.handle);
+          if (sel.ok) {
+            await this.sleep(100);
+            current = (await this.driver.perceive()).observation;
+            del = findProbeDeleteAction(current);
+          }
+        }
       }
-      return n === 'delete selected' || n === 'remove element' || n === 'remove node';
-    });
-    if (!del) return;
-    const res = await this.driver.click(del.handle);
-    if (!res.ok) return;
-    await this.sleep(150);
+      if (!del) continue;
+
+      const res = await this.driver.click(del.handle);
+      if (!res.ok) continue;
+      await this.sleep(150);
+      current = (await this.driver.perceiveAfterSettle(100)).observation;
+      if (current.elements.length <= baselineSize) return;
+    }
   }
 
   /**
@@ -396,7 +494,7 @@ export class ProbeRunner {
     const matchedTypes = CANONICAL_TYPES.filter(
       (t) => classifyTypeFromProbe(t, probe).matches,
     );
-    await this.removePlacedProbe(observed);
+    await this.removePlacedProbe(before.observation, observed);
     return { probe, matchedTypes };
   }
 

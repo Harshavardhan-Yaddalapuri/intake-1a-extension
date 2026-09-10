@@ -1686,12 +1686,26 @@ export class Orchestrator {
     );
     for (let hop = 0; hop < 4 && !reached; hop += 1) {
       const { observation } = await this.driver.perceive();
+      // Still inside this visit's form list after a hop (e.g. designer →
+      // detail via "<- Screening"). That IS the destination — keep climbing
+      // and we leave it for the schedule, then fail to re-open (Hostile E2E
+      // v6 Screening "could not open this visit" after Demographics).
+      if (atVisitDetail(observation, visit.name)) {
+        this.currentVisitId = visitId;
+        this.currentFormId = null;
+        return true;
+      }
       const best = rankAscendCandidates(observation, visitNames)[0];
       if (!best) break;
       await this.driver.click(best.handle);
       await this.sleep(450);
       const { observation: after } = await this.driver.perceiveAfterSettle(200);
       hops.push(best.name);
+      if (atVisitDetail(after, visit.name)) {
+        this.currentVisitId = visitId;
+        this.currentFormId = null;
+        return true;
+      }
       reached = atVisitList(after, visitNames, createControl);
     }
 
