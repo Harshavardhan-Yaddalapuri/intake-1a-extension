@@ -536,7 +536,7 @@ export class ProbeRunner {
               ? Number((existing.evidence.find((e) => e.startsWith('probe-specificity:')) || 'probe-specificity:99').split(':')[1])
               : 99;
             if (!existing || specificity < prevSpec) {
-              const binding = makeTypeBinding(m, probe, liveBtn.name, liveBtn.handle, liveBtn.role);
+              const binding = makeTypeBinding(m, probe, liveBtn.name, liveBtn.handle);
               binding.evidence = [`probe-specificity:${specificity}`, ...binding.evidence];
               bindings[m] = binding;
             }

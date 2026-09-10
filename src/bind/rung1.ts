@@ -63,10 +63,6 @@ export interface ProbeResult {
   hasFormulaEditor?: boolean;
   hasDatePickerOptions?: boolean;
   hasDecimalPlaces?: boolean;
-  /** Canvas preview carries a date mask (e.g. DD-MMM-YYYY). */
-  hasDateFormatHint?: boolean;
-  /** Canvas preview carries a time mask (e.g. HH:MM). */
-  hasTimeFormatHint?: boolean;
   /**
    * Canonical type declared by the property-panel type picker (Node Type /
    * Element Type). Hostile envs expose the canonical id as <select>.value;
@@ -150,9 +146,7 @@ function matchesHint(name: string, hint: HintKey): boolean {
  *  editor had appeared, which is precisely the name-over-structure mistake
  *  the probe exists to correct. */
 function namesSuggestIn(elements: readonly ObservationElement[], hint: HintKey): boolean {
-  return elements.some(
-    (e) => matchesHint(e.name, hint) || matchesHint(e.groupText ?? '', hint),
-  );
+  return elements.some((e) => matchesHint(e.name, hint));
 }
 
 /** Read the canonical type from a Node Type / Element Type picker in the panel.
@@ -167,13 +161,9 @@ export function readDeclaredCanonical(
   panelControls: readonly ObservationElement[],
 ): CanonicalType | null {
   const picker = panelControls.find(
-    (e) => {
-      const typeNamed = /\btype\b/i.test(e.name) || /\btype\b/i.test(e.groupText ?? '');
-      if (!typeNamed) return false;
-      // Native <select> / listbox, or a11y-hostile custom list (role=generic)
-      // whose accessible name is the currently displayed type label.
-      return e.role === 'combobox' || e.role === 'listbox' || e.role === 'generic' || e.role === 'button';
-    },
+    (e) =>
+      (e.role === 'combobox' || e.role === 'listbox') &&
+      /\btype\b/i.test(e.name),
   );
   if (!picker) return null;
   const raw = (picker.state.value ?? '').trim().toLowerCase().replace(/[\s/-]+/g, '_');
@@ -181,62 +171,16 @@ export function readDeclaredCanonical(
     return raw as CanonicalType;
   }
   // Friendly mocks sometimes store the visible label as the value ("Date").
-  // Hostile Prism Fragment Type dropList keeps the friendly label as the
-  // accessible name while state.value is empty.
-  const label = (picker.state.value || picker.name || '').trim().toLowerCase();
+  const label = (picker.state.value ?? '').trim().toLowerCase();
   const fromLabel: Record<string, CanonicalType> = {
     date: 'date',
     time: 'time',
     'date/time': 'datetime',
     datetime: 'datetime',
     'date time': 'datetime',
-    text: 'text',
-    textarea: 'textarea',
-    integer: 'integer',
-    decimal: 'decimal',
-    boolean: 'boolean',
-    checkbox: 'checkbox',
-    radio: 'radio',
-    calculated: 'calculated',
   };
   if (fromLabel[label]) return fromLabel[label];
-  // Adversarial friendly names (Glyph Line, Sun Marker, …) only for custom
-  // dropLists. Native <select> values like "Radio Buttons" must NOT map via
-  // substring ('radio') — that made empty radios look declared and broke
-  // choice-type-readback / multi_select vacuous matching.
-  if (picker.role !== 'generic' && picker.role !== 'button') return null;
-  let best: CanonicalType | null = null;
-  let bestHits = 0;
-  let tied = false;
-  for (const t of CANONICAL_TYPES) {
-    const hits = friendlyTypeLabelHits(t, label);
-    if (hits > bestHits) { best = t; bestHits = hits; tied = false; }
-    else if (hits > 0 && hits === bestHits) tied = true;
-  }
-  if (best && bestHits > 0 && !tied) return best;
   return null;
-}
-
-/** Friendly type-picker labels → canonical. Used only when the picker value is
- *  not already a canonical id (Prism Fragment Type dropList). */
-function friendlyTypeLabelHits(canonical: CanonicalType, name: string): number {
-  const TABLE: Record<CanonicalType, readonly string[]> = {
-    text: ['line', 'text', 'string', 'glyph line'],
-    textarea: ['block', 'paragraph', 'glyph block'],
-    integer: ['int', 'whole', 'integer', 'count int'],
-    decimal: ['decimal', 'precise', 'float', 'count precise'],
-    date: ['date', 'sun', 'calendar', 'sun marker'],
-    time: ['time', 'hour', 'clock', 'hour marker'],
-    datetime: ['datetime', 'chrono', 'timestamp', 'chrono marker'],
-    boolean: ['boolean', 'switch', 'polarity', 'yes/no'],
-    single_select: ['dropdown', 'lens', 'lens list'],
-    multi_select: ['token', 'tray', 'token tray', 'checklist'],
-    radio: ['radio', 'beam', 'cluster', 'beam cluster'],
-    checkbox: ['checkbox', 'tick', 'tick slate'],
-    calculated: ['calculated', 'formula', 'synthesis', 'synthesis output'],
-  };
-  const n = name.toLowerCase();
-  return (TABLE[canonical] ?? []).filter((s) => n.includes(s)).length;
 }
 
 
@@ -267,9 +211,7 @@ export function inspectPlacedControl(
   //    tick box as a multi-select. Affordances are therefore judged relative
   //    to the placed control, never to everything that appeared.
   const isPropertyEditorControl = (el: ObservationElement) =>
-    matchesHint(el.name, 'property_editor')
-    || matchesHint(el.groupText ?? '', 'property_editor')
-    || matchesHint(el.groupText ?? '', 'panel_field');
+    matchesHint(el.name, 'property_editor');
 
   const canvasControls = addedElements.filter((e) => !isPropertyEditorControl(e));
   const panelControls = addedElements.filter((e) => isPropertyEditorControl(e));
@@ -280,22 +222,15 @@ export function inspectPlacedControl(
   // field. Reading them made empty Dial Group / Beam Pick look like
   // checkbox+optionsEditor (= multi_select), and radio never bound.
   const namedCanvas = canvasControls.filter((e) => (e.name || '').trim() !== '');
+  const canvasForPlace = namedCanvas.length > 0 ? namedCanvas : [];
 
   const DATA_ROLES = [
     'checkbox', 'radio', 'combobox', 'listbox', 'radiogroup',
     'spinbutton', 'textbox', 'switch', 'slider',
   ];
-  // Prefer a data-role control on the canvas even when nameless (Prism paints
-  // empty contenteditable previews). Named cards alone would hide the textbox
-  // and leave date/integer probes at role=none after the Label cell moved to
-  // the panel via groupText.
   const placedCandidate =
-    canvasControls.find((e) => DATA_ROLES.includes(e.role))
-    ?? namedCanvas[0]
-    ?? canvasControls[0];
-  const canvasForPlace = placedCandidate
-    ? [placedCandidate, ...namedCanvas.filter((e) => e.handle !== placedCandidate.handle)]
-    : [];
+    canvasForPlace.find((e) => DATA_ROLES.includes(e.role)) ??
+    canvasForPlace[0];
 
   // 2. Detect affordances.
   //
@@ -307,14 +242,7 @@ export function inspectPlacedControl(
     (placedCandidate?.options.length ?? 0) > 0 ||
     // Or the property panel offers a coded-value editor -- checked against the
     // PANEL only, so the field's own label ("Multi Choice Box") cannot vote.
-    // Exclude the type picker: its option labels ("Lens List") contain coded_values
-    // hint words like "list" and would mark every Prism tile as a choice control.
-    namesSuggestIn(
-      panelControls.filter(
-        (e) => !/\btype\b/i.test(e.name) && !/\btype\b/i.test(e.groupText ?? ''),
-      ),
-      'coded_values',
-    );
+    namesSuggestIn(panelControls, 'coded_values');
 
   const hasRangeEditor =
     (placedCandidate?.state.range !== undefined) ||
@@ -334,19 +262,8 @@ export function inspectPlacedControl(
   // tiles on the canvas, so the type picker may not appear in the diff even
   // though it now shows the newly selected element's canonical type.
   const declaredCanonical =
-    readDeclaredCanonical(afterObs.elements.filter(
-      (e) => matchesHint(e.name, 'property_editor') || matchesHint(e.groupText ?? '', 'property_editor'),
-    ))
+    readDeclaredCanonical(afterObs.elements.filter((e) => matchesHint(e.name, 'property_editor')))
     ?? readDeclaredCanonical(panelControls);
-
-  // Structural date/time masks painted beside the canvas preview (Prism:
-  // "DD-MMM-YYYY" / "HH:MM") — not vocabulary about the palette tile name.
-  const formatBlob = canvasControls
-    .map((e) => `${e.groupText ?? ''} ${e.name ?? ''}`)
-    .join(' ')
-    .toLowerCase();
-  const hasDateFormatHint = /\bdd[-/\s]?mmm[-/\s]?yyyy\b|\byyyy[-/]mm[-/]dd\b|\bmm\/dd\/yyyy\b/.test(formatBlob);
-  const hasTimeFormatHint = /\bhh:mm\b/.test(formatBlob);
 
   // Find placed control from named canvas controls only (see canvasForPlace).
   let placedControl = canvasForPlace.find(
@@ -385,8 +302,6 @@ export function inspectPlacedControl(
         hasFormulaEditor,
         hasDatePickerOptions,
         hasDecimalPlaces,
-        hasDateFormatHint,
-        hasTimeFormatHint,
         declaredCanonical,
         evidence: [
           `property panel type picker declares canonical "${declaredCanonical}" (no named canvas control yet)`,
@@ -406,8 +321,6 @@ export function inspectPlacedControl(
       hasFormulaEditor,
       hasDatePickerOptions,
       hasDecimalPlaces,
-      hasDateFormatHint,
-      hasTimeFormatHint,
       declaredCanonical: null,
       evidence: [
         hasOptionsEditor
@@ -458,8 +371,6 @@ export function inspectPlacedControl(
     hasFormulaEditor,
     hasDatePickerOptions,
     hasDecimalPlaces,
-    hasDateFormatHint,
-    hasTimeFormatHint,
     declaredCanonical,
     evidence,
     destructive: false,
@@ -569,11 +480,8 @@ export function classifyTypeFromProbe(
 
   // Numeric types
   if (canonical === 'decimal') {
-    // Require an explicit decimal-places affordance (or declaredCanonical above).
-    // Bare range+textbox also matches integer and stole Count Int from integer
-    // on Prism (both types specificity=2, first tile wins).
-    if (probe.hasDecimalPlaces) {
-      return { matches: true, evidence: `decimal: decimal-places affordance present` };
+    if (probe.hasDecimalPlaces || (probe.hasRangeEditor && (probe.observedRole === 'textbox' || probe.observedRole === 'spinbutton'))) {
+      return { matches: true, evidence: `decimal: numeric with range and decimal places` };
     }
   }
 
@@ -587,29 +495,6 @@ export function classifyTypeFromProbe(
   if (canonical === 'calculated') {
     if (probe.hasFormulaEditor) {
       return { matches: true, evidence: `calculated: formula editor present` };
-    }
-  }
-
-  // Canvas date/time masks are structural — reserve the textbox-family role
-  // match so Sun Marker does not also bind text/textarea/date siblings.
-  if (probe.hasDateFormatHint || probe.hasTimeFormatHint) {
-    const isDatetime = !!(probe.hasDateFormatHint && probe.hasTimeFormatHint);
-    const isDate = !!(probe.hasDateFormatHint && !probe.hasTimeFormatHint);
-    const isTime = !!(probe.hasTimeFormatHint && !probe.hasDateFormatHint);
-    if (canonical === 'datetime') {
-      return { matches: isDatetime, evidence: isDatetime ? 'datetime: date+time format hint on canvas' : 'datetime: format hint is not combined date+time' };
-    }
-    if (canonical === 'date') {
-      return { matches: isDate, evidence: isDate ? 'date: date format hint on canvas' : 'date: format hint is not date-only' };
-    }
-    if (canonical === 'time') {
-      return { matches: isTime, evidence: isTime ? 'time: time format hint on canvas' : 'time: format hint is not time-only' };
-    }
-    if (
-      canonical === 'text' || canonical === 'textarea' || canonical === 'integer'
-      || canonical === 'decimal' || canonical === 'calculated'
-    ) {
-      return { matches: false, evidence: `${canonical}: canvas format hint reserves date/time` };
     }
   }
 
@@ -884,7 +769,6 @@ export function makeTypeBinding(
   probe: ProbeResult,
   paletteButtonName: string,
   paletteButtonHandle: string,
-  paletteButtonRole: string = 'button',
 ): BindingRecord {
   const classification = classifyTypeFromProbe(canonicalType, probe);
   const expectedRoles = expectedRolesForType(canonicalType);
@@ -895,9 +779,7 @@ export function makeTypeBinding(
     recipe: [
       {
         step: 'click',
-        // Hostile palettes use role=generic tiles; prefer the observed role so
-        // resolveRecipeTarget hits role+name before the name-only fallback.
-        evidence_role: paletteButtonRole || 'button',
+        evidence_role: 'button',
         evidence_name: paletteButtonName,
         handle_kind: 'snapshot-id',
       },

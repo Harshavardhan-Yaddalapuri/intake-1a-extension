@@ -64,13 +64,8 @@ export function findByRole(
       // rather than silently skipping field.set_required.
       const name = el.name.toLowerCase();
       const group = (el.groupText ?? '').toLowerCase();
-      // Match name OR groupText. Prism Label cells keep the field value as
-      // accessible name ("Glyph Line") while only groupText says "Label" —
-      // `name || group` preferred the value and skipped field.set_label.
-      if (nameFilter.contains) {
-        const c = nameFilter.contains.toLowerCase();
-        if (!name.includes(c) && !group.includes(c)) continue;
-      }
+      const haystack = name || group;
+      if (nameFilter.contains && !haystack.includes(nameFilter.contains.toLowerCase())) continue;
       if (nameFilter.equals) {
         const eq = nameFilter.equals.toLowerCase();
         if (name !== eq && group !== eq) continue;
@@ -748,11 +743,7 @@ export function bindFieldAdd(obs: Observation, canonicalType: CanonicalType): Bi
   const scored: Array<{ el: ObservationElement; score: number; why: string }> = [];
 
   for (const el of obs.elements) {
-    // a11y-hostile palettes (Prism Fragments) expose tiles as role=generic
-    // cursor:pointer divs — same actionable surface as <button>, just no
-    // host-language role. Excluding them left every field.add NULL and the
-    // live run at fields=0 despite tiles being visible.
-    if (el.role !== 'button' && el.role !== 'generic') continue;
+    if (el.role !== 'button') continue;
     const name = el.name.toLowerCase();
 
     const own = synonymHits(canonicalType, name) + (name.includes(typeLower) ? 1 : 0);
@@ -797,10 +788,10 @@ export function bindFieldAdd(obs: Observation, canonicalType: CanonicalType): Bi
   return makeBinding(
     'field.add',
     0,
-    [{ step: 'click', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id' }],
+    [{ step: 'click', evidence_role: 'button', evidence_name: best.el.name, handle_kind: 'snapshot-id' }],
     `a new control of role [${expectedRoles.join('|')}] appears on canvas`,
     [
-      `role=${best.el.role}, ${best.why}`,
+      `role=button, ${best.why}`,
       ...(runnerUp ? [`next best: "${runnerUp.el.name}" (score ${runnerUp.score} vs ${best.score})`] : []),
       `expected roles: ${expectedRoles.join(', ')}`,
     ],
@@ -816,11 +807,11 @@ const SYNONYMS: Record<CanonicalType, readonly string[]> = {
   // matches one matches the other. Two words, not the bare 'single', which
   // belongs to single_select.
   text: ['text', 'textbox', 'line', 'single line', 'single-line', 'short'],
-  textarea: ['textarea', 'multi-line', 'multiline', 'multi line', 'paragraph', 'long', 'block'],
+  textarea: ['textarea', 'multi-line', 'multiline', 'multi line', 'paragraph', 'long'],
   integer: ['integer', 'whole', 'number'],
   decimal: ['decimal', 'float', 'number'],
-  date: ['date', 'calendar'],
-  time: ['time', 'hour', 'clock'],
+  date: ['date'],
+  time: ['time'],
   datetime: ['datetime', 'date/time', 'timestamp'],
   boolean: ['boolean', 'toggle', 'yes/no', 'yesno', 'switch'],
   single_select: ['dropdown', 'select', 'single', 'picklist', 'combo'],
