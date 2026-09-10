@@ -345,30 +345,50 @@ export function rankCandidates(
   const scored = pool.map((el, inputIndex) => {
     const signals: RankSignal[] = [];
     const lower = el.name.toLowerCase();
+    // Nameless / content-named controls (hostile contenteditable cells): the
+    // adjacent label lives in groupText ("Wave Name" vs "Window Start (day)").
+    // Score that text too so name_input cannot tie-break into a day field.
+    // Proper accessible names still dominate via the same lexical weights.
+    const groupLower = (el.groupText ?? '').toLowerCase();
+    const lexicalSurfaces: { label: string; text: string }[] = [
+      { label: 'name', text: lower },
+    ];
+    if (groupLower.trim() && groupLower.trim() !== lower.trim()) {
+      lexicalSurfaces.push({ label: 'groupText', text: groupLower });
+    }
 
     // Count EVERY matching hint word, not just the first. A create control
     // named "+ New Phase" answers visit_create on three cues (phase, new, +)
     // where a nav tab named "Phases" answers on one; stopping at the first hit
     // tied them and DOM order handed the binding to the inert tab, so live
     // visit.create became a no-op and atVisitList stayed true on every screen.
-    const trimmed = lower.trim();
+    const seenWords = new Set<string>();
     let exactHit = false;
-    for (const word of hints) {
-      if (trimmed === word) {
-        signals.push({
-          name: 'lexical-exact',
-          weight: WEIGHT.lexicalExact,
-          detail: `name is exactly "${word}"`,
-        });
-        exactHit = true;
-        continue;
-      }
-      if (lower.includes(word)) {
-        signals.push({
-          name: 'lexical',
-          weight: WEIGHT.lexical,
-          detail: `name contains "${word}" (weak hint only)`,
-        });
+    for (const surface of lexicalSurfaces) {
+      const trimmed = surface.text.trim();
+      for (const word of hints) {
+        if (trimmed === word) {
+          if (!seenWords.has(`exact:${word}`)) {
+            signals.push({
+              name: 'lexical-exact',
+              weight: WEIGHT.lexicalExact,
+              detail: `${surface.label} is exactly "${word}"`,
+            });
+            seenWords.add(`exact:${word}`);
+          }
+          exactHit = true;
+          continue;
+        }
+        if (surface.text.includes(word)) {
+          if (!seenWords.has(`lex:${word}`)) {
+            signals.push({
+              name: 'lexical',
+              weight: WEIGHT.lexical,
+              detail: `${surface.label} contains "${word}" (weak hint only)`,
+            });
+            seenWords.add(`lex:${word}`);
+          }
+        }
       }
     }
     // Exact already scored the whole name; do not also pile substring hits for
@@ -380,11 +400,12 @@ export function rankCandidates(
     }
 
     for (const decoyHint of options.demote ?? []) {
-      if (LEXICAL_HINTS[decoyHint].some((w) => lower.includes(w))) {
+      const hay = `${lower} ${groupLower}`;
+      if (LEXICAL_HINTS[decoyHint].some((w) => hay.includes(w))) {
         signals.push({
           name: 'decoy',
           weight: WEIGHT.demoted,
-          detail: `name matches the "${decoyHint}" list -- a known decoy for this question, tried last`,
+          detail: `name/groupText matches the "${decoyHint}" list -- a known decoy for this question, tried last`,
         });
         break;
       }
