@@ -193,7 +193,28 @@ function textAlternative(el: Element): string {
       return (el as HTMLInputElement).value.trim();
     }
   }
-  return (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+  // Walk visible text only. Closed custom dropdown panels (display:none)
+  // otherwise dump every option into the host's accessible name — Prism
+  // Fragment Type became "Glyph LineSynthesis OutputToken Tray…" and
+  // poisoned type-picker + coded_values detection.
+  return visibleText(el).replace(/\s+/g, ' ').trim();
+}
+
+function visibleText(el: Element): string {
+  const parts: string[] = [];
+  const walk = (node: Node) => {
+    if (node.nodeType === 3) { // TEXT_NODE
+      const t = node.textContent ?? '';
+      if (t.trim()) parts.push(t);
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    const child = node as Element;
+    if (!isPerceivable(child) && child !== el) return;
+    for (const c of Array.from(child.childNodes)) walk(c);
+  };
+  walk(el);
+  return parts.join(' ');
 }
 
 function resolveLabelledby(el: Element, doc: Document): string {

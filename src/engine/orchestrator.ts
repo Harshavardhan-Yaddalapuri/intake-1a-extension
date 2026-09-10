@@ -868,6 +868,7 @@ export class Orchestrator {
               adjudication.probe,
               pick.el.name,
               pick.el.handle,
+              pick.el.role,
             );
             this.typeBindings[field.canonical_type] = binding;
             typeBinding = binding;
@@ -1005,13 +1006,17 @@ export class Orchestrator {
   ): Promise<void> {
     const { observation } = await this.driver.perceive();
 
-    // Find the Label input in the options panel.
-    const labelInputs = observation.elements.filter(
-      (e) => e.role === 'textbox' && (
-        e.name.toLowerCase() === 'label' ||
-        e.name.toLowerCase().includes('label')
-      ),
-    );
+    // Prefer groupText/name "Label" (findByRole matches either). Prism keeps
+    // the current value as the accessible name ("Glyph Line") so a name-only
+    // includes("label") check misses the cell and the fallback wrote into the
+    // Fragments filter instead — fields never got IR labels.
+    const byRole = findByRole(observation, 'textbox', { contains: 'label' });
+    const labelInputs = byRole
+      .map((c) => c.el)
+      .filter((e) => {
+        const blob = `${e.name} ${e.groupText ?? ''}`.toLowerCase();
+        return !blob.includes('filter') && !blob.includes('search') && !blob.includes('paste');
+      });
 
     if (labelInputs.length > 0) {
       await this.driver.setValue(labelInputs[0].handle, field.label);
@@ -1019,10 +1024,23 @@ export class Orchestrator {
       return;
     }
 
-    // Fallback: look for candidate textbox that is not filter/search
-    const candidateTextboxes = observation.elements.filter(
-      (e) => e.role === 'textbox' && !e.name.toLowerCase().includes('filter') && !e.name.toLowerCase().includes('search'),
+    // Fallback: textbox whose groupText is exactly-ish Label, else first
+    // non-filter textbox that is not the palette filter (group Fragments).
+    const byGroup = observation.elements.filter(
+      (e) => e.role === 'textbox' && /\blabel\b/i.test(e.groupText ?? ''),
     );
+    if (byGroup.length > 0) {
+      await this.driver.setValue(byGroup[0].handle, field.label);
+      await this.sleep(200);
+      return;
+    }
+
+    const candidateTextboxes = observation.elements.filter((e) => {
+      if (e.role !== 'textbox') return false;
+      const blob = `${e.name} ${e.groupText ?? ''}`.toLowerCase();
+      if (blob.includes('filter') || blob.includes('search') || blob.includes('fragment')) return false;
+      return true;
+    });
     if (candidateTextboxes.length > 0) {
       await this.driver.setValue(candidateTextboxes[0].handle, field.label);
       await this.sleep(200);
@@ -1135,7 +1153,7 @@ export class Orchestrator {
       const paletteName = typeBinding.recipe[0]?.evidence_name ?? '';
       const paletteEl = preObs.elements.find((e) => e.name === paletteName);
       this.typeBindings[field.canonical_type] = makeTypeBinding(
-        field.canonical_type, probe, paletteName, paletteEl?.handle ?? '',
+        field.canonical_type, probe, paletteName, paletteEl?.handle ?? '', paletteEl?.role ?? 'button',
       );
       this.journal.note(
         scope,
