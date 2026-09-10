@@ -1,0 +1,80 @@
+{
+  "platform": "env-rosetta",
+  "overall_match_pct": 99.44,
+  "total_expected": 1067,
+  "total_matched": 1061,
+  "criteria": {
+    "visits": {
+      "expected": 4,
+      "matched": 4,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "visit-windows": {
+      "expected": 4,
+      "matched": 4,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "forms": {
+      "expected": 28,
+      "matched": 28,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "repeating": {
+      "expected": 28,
+      "matched": 28,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "fields": {
+      "expected": 28,
+      "matched": 28,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "types": {
+      "expected": 195,
+      "matched": 195,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "required": {
+      "expected": 195,
+      "matched": 195,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "coded-pairs": {
+      "expected": 195,
+      "matched": 195,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "ranges": {
+      "expected": 195,
+      "matched": 189,
+      "match_pct": 96.92,
+      "mismatches": [
+        "field 'Dose Administered' range expected [0,1000,mg], got [,1000,mg]",
+        "field 'Dose Administered' range expected [0,1000,mg], got [,1000,mg]",
+        "field 'Alanine Aminotransferase' range expected [0,2000,U/L], got [,2000,U/L]",
+        "field 'Aspartate Aminotransferase' range expected [0,2000,U/L], got [,2000,U/L]",
+        "field 'Total Bilirubin' range expected [0,30,mg/dL], got [,30,mg/dL]",
+        "field 'Creatinine' range expected [0,20,mg/dL], got [,20,mg/dL]"
+      ]
+    },
+    "skip-rules": {
+      "expected": 195,
+      "matched": 195,
+      "match_pct": 100.0,
+      "mismatches": []
+    }
+  },
+  "runtime": {
+    "escalations": "N/A",
+    "llm_calls": "N/A",
+    "human_decisions": "N/A"
+  }
+}

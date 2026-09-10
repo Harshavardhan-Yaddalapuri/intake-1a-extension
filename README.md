@@ -119,18 +119,20 @@ Those APIs are for human / harness scoring only.
 
 ### Hostile / unseen mocks (live E2E)
 
-| Environment | Best live overall | Notes |
+Best **v14** live overalls on tip `d220d9d` (see `docs/generalization-runs/LIVE_V14_RESULTS_d220d9d.md`):
+
+| Environment | Live overall | Notes |
 |---|---:|---|
-| env-swapped-controls | **19.4%** (v7) | v8 regressed to 0.37% (flaky visit-open / SW / runner) |
-| env-rosetta | **3.37%** | Demographics often polluted with leftover palette tile names |
-| env-wizard | **0.37%** | Little/no meaningful build |
-| env-hostile-a11y | **0%** | Accessibility observe effectively empty |
+| env-rosetta | **99.44%** | Vocabulary-hostile; required/coded pairs strong |
+| env-swapped-controls | **93.91%** | Inverted type labels; near-complete build |
+| env-wizard | **77.51%** | Wizard/hamburger UI; recovered after Done-decoy commit bug |
+| env-hostile-a11y | **4.4%** | Zero-ARIA: visits/forms create, **field placement still 0** |
 
-Harness perfect-seed ceiling is **100%** on all four (scoring input shape is
-fine). Live agent generalization is **not** at a ~70% never-seen bar.
+Harness perfect-seed ceiling is **100%** on all four. Three of four proxies
+clear a ~70% unseen bar; zero-ARIA field write remains the honest gap.
 
-Evidence: `docs/GENERALIZATION_EVIDENCE.md` and
-`docs/generalization-runs/*-score.json`.
+Evidence: `docs/generalization-runs/LIVE_V14_RESULTS_d220d9d.md` and
+`docs/generalization-runs/*-after-v14-score.json`.
 
 ## Special considerations scorecard
 
@@ -172,13 +174,13 @@ zero form-domain knowledge, zero LLM calls.
 
 ## Known limitations
 
-- Cannot claim ~70% on never-seen mocks with current live evidence.
-- Hostile runs are flaky (service-worker lifetime, visit-open gates, probe
-  cleanup leaving palette names on canvas).
-- `env-hostile-a11y` is effectively unobservable via the a11y tree.
+- Three of four hostile proxies score ≥70% live (v14); zero-ARIA
+  (`env-hostile-a11y`) still fails field placement after visit/form create.
+- Lexical vocabulary hints (e.g. wave/survey, wizard Next) are weak priors —
+  structural perceive/bind/verify is the real generalization path.
 - Idempotency is implemented (skip already-verified / check-first create) but
-  needs a fresh second Mock A recording for graders.
-- Five Mock A range `min=0` edge cases remain.
+  a fresh second Mock A recording is still recommended for graders.
+- Five Mock A range `min=0` edge cases remain on the friendly mock.
 
 ## AI tools used
 
