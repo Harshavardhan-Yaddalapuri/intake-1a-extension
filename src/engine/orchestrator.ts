@@ -13,7 +13,8 @@
  *   - Navigation is IMPLICIT in the plan: the plan is ordered visit -> form ->
  *     field, and the orchestrator navigates when the visit/form context changes.
  *   - Checkpoint after every verified item for resume on page reload.
- *   - The orchestrator PAUSES on escalation and waits for human input.
+ *   - Blocking escalations pause for human input; verifying/parked findings
+ *     never halt the build (reviewed in one sitting at the end).
  *   - Pre-flight runs discovery probes before the main execution loop.
  */
 
@@ -119,6 +120,21 @@ export interface OrchestratorCallbacks {
   onParkedReview?: (items: EscalationItem[]) => void;
 }
 
+
+/**
+ * Whether an escalation should halt the orchestrator.
+ *
+ * Verifying findings mean the field is already in the study ("Built — needs a
+ * look"). They must never block: hostile v7 parked the schedule on Sex at Birth
+ * after Demographics was clean and later visits never built.
+ */
+export function escalationIsBlocking(
+  phase: 'binding' | 'acting' | 'verifying',
+  blocking: boolean,
+): boolean {
+  return phase === 'verifying' ? false : blocking;
+}
+
 export class Orchestrator {
   private ir: Ir;
   private plan: Plan;
@@ -157,8 +173,12 @@ export class Orchestrator {
    *  set_coded_values has run. See adjudicateType. */
   private deferredTypeProbe: Map<CanonicalType, Observation> = new Map();
 
-  /** Escalation queue: items waiting for human input. */
-  private escalationQueue: Map<string, { resolve: (d: HumanDecision) => void }> = new Map();
+  /** Escalation queue: blocking items waiting for human input.
+   *  Stores the full EscalationItem so reconnect does not invent phase/blocking. */
+  private escalationQueue: Map<string, {
+    item: EscalationItem;
+    resolve: (d: HumanDecision) => void;
+  }> = new Map();
 
   /** Pause promise: resolves when the user resumes. */
   private pauseResolve: (() => void) | null = null;
@@ -316,6 +336,7 @@ export class Orchestrator {
   /** Resolve a human escalation. */
   resolveEscalation(key: string, decision: HumanDecision): void {
     const pending = this.escalationQueue.get(key);
+    const fromQueue = pending?.item;
     if (pending) {
       pending.resolve(decision);
       this.escalationQueue.delete(key);
@@ -324,13 +345,12 @@ export class Orchestrator {
     // A decision on a grouped escalation settles every item in that group.
     // 13 canonical types means at most 13 type decisions, never 195.
     const resolved =
-      this.parked.find((p) => p.key === key) ?? null;
+      fromQueue ?? this.parked.find((p) => p.key === key) ?? null;
     const groupKey = resolved?.groupKey;
     if (groupKey) {
       this.groupDecisions.set(groupKey, decision);
       for (const [otherKey, waiter] of [...this.escalationQueue]) {
-        const other = this.parked.find((p) => p.key === otherKey);
-        if (other?.groupKey === groupKey) {
+        if (waiter.item.groupKey === groupKey) {
           waiter.resolve(decision);
           this.escalationQueue.delete(otherKey);
         }
@@ -344,29 +364,11 @@ export class Orchestrator {
 
   /** Get the escalation queue for side panel reconnect. */
   getEscalationQueue(): EscalationItem[] {
-    const items: EscalationItem[] = [];
-    for (const [key] of this.escalationQueue) {
-      const item = this.runState.items[key];
-      if (item) {
-        const field = this.irFieldMap.get(item.field_id);
-        const form = this.irFormMap.get(item.form_id);
-        const visit = this.irVisitMap.get(item.visit_id);
-        items.push({
-          key,
-          fieldLabel: field?.label ?? item.field_id,
-          formName: form?.name ?? item.form_id,
-          visitName: visit?.name ?? item.visit_id,
-          canonicalType: (field?.canonical_type ?? 'text') as CanonicalType,
-          reason: item.escalation_reason ?? 'unknown',
-          // Reconstructed from the live queue: anything still waiting on a
-          // human by definition blocked the run.
-          blocking: true,
-          evidence: [],
-          phase: 'verifying',
-        });
-      }
-    }
-    return items;
+    // Return the items we stored when we opened the gate. Do NOT reconstruct
+    // with phase:'verifying' / blocking:true — that turned binding and visit
+    // gates into "Built — needs a look" after a worker blip, and dropped
+    // visit-nav / form-open waiters that have no runState.items entry.
+    return [...this.escalationQueue.values()].map((w) => w.item);
   }
 
   // -------------------------------------------------------------------------
@@ -2436,6 +2438,7 @@ export class Orchestrator {
    * Items sharing a groupKey resolve together: answering "single_select maps
    * to Beam Pick" once settles all 14 single_select fields.
    */
+
   private async escalateItem(
     itemKey: string,
     phase: 'binding' | 'acting' | 'verifying',
@@ -2453,17 +2456,30 @@ export class Orchestrator {
       await applyTransition(this.adapter, this.runState, itemKey, 'escalate');
     }
 
-    const item: EscalationItem = { ...escalation, blocking };
-    this.callbacks.onEscalation(item);
+    // Verifying findings mean the field is already in the study. They are
+    // never a reason to halt the schedule — live hostile v7 parked the whole
+    // run on "Built — needs a look" for Sex at Birth after Demographics was
+    // otherwise clean, and later visits never built (~75% of score).
+    const effectiveBlocking = escalationIsBlocking(phase, blocking);
+    const item: EscalationItem = {
+      ...escalation,
+      phase,
+      blocking: effectiveBlocking,
+    };
 
     const source = this.sourceOfKey(itemKey, escalation);
 
-    if (!blocking) {
-      // Park it. The run continues; the reviewer clears the pile at the end.
+    if (!effectiveBlocking) {
+      // Park silently. Do not broadcast a mid-run ESCALATION card: Approve/Skip
+      // on a parked "Built — needs a look" looks like a gate and caused
+      // computerUse (and humans) to stop while the orchestrator could continue.
+      // The pile is delivered once via onParkedReview at the end of the run.
       this.parked.push(item);
       this.journal.escalated(source, escalation.reason, null);
       return null;
     }
+
+    this.callbacks.onEscalation(item);
 
     // Blocking waits can sit for minutes with no tab traffic. MV3 will still
     // kill an "idle" worker even while this Promise is outstanding; touch
@@ -2478,6 +2494,7 @@ export class Orchestrator {
         }
       }, 20000);
       this.escalationQueue.set(itemKey, {
+        item,
         resolve: (d: HumanDecision) => {
           clearInterval(pulse);
           resolve(d);
