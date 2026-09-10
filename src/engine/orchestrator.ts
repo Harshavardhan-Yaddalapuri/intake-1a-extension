@@ -60,12 +60,14 @@ import {
   chromeStorageAdapter,
 } from './state-machine';
 import { TabDriver } from './tab-driver';
+import { navGateAllowsContinue, navGateShouldRetryOpen } from './nav-gate';
 import {
   bindAllRung0,
   bindFieldAdd,
   findByRole,
   findByNameOnly,
   findAddCodedValueControl,
+  findCodedValueRemoveControls,
   expectedRolesForType,
 } from '../bind/rung0';
 import { ProbeRunner } from './probe-runner';
@@ -1223,6 +1225,7 @@ export class Orchestrator {
     // and parked every multi_select. Nudge a shape-changing add+remove so the
     // canvas catches up before deferred type read-back / set_required.
     await this.nudgeCodedValuesCanvasRefresh(codesOf);
+    await this.pruneEmptyCodedValueRows(codesOf, field.options.length);
 
     // The options now exist, so the control finally shows what it is. Settle
     // any read-back this type deferred at add time.
@@ -1251,14 +1254,44 @@ export class Orchestrator {
     await this.sleep(150);
     ({ observation } = await this.driver.perceive());
     if (codesOf(observation).length <= before) return;
-    const removes = observation.elements.filter(
-      (e) =>
-        e.role === 'button' &&
-        (e.name === '×' || e.name.toLowerCase().includes('remove')),
-    );
-    if (removes.length === 0) return;
+    // Rosetta/Nexus label the row delete control "x", not "×" or "Remove".
+    // Missing that match left a permanent blank ('','') option after every
+    // choice field write (live Rosetta v9 coded-pairs).
+    const removes = findCodedValueRemoveControls(observation);
+    if (removes.length === 0) {
+      // Could not undo the nudge — still try to drop an empty trailing row
+      // by re-finding after a beat rather than leaving the blank option.
+      return;
+    }
     await this.driver.click(removes[removes.length - 1].handle);
     await this.sleep(150);
+  }
+
+  /**
+   * Drop trailing empty code/label rows left by a failed canvas-refresh nudge
+   * or by editors that keep a blank starter row after real values are filled.
+   */
+  private async pruneEmptyCodedValueRows(
+    codesOf: (o: Observation) => ReturnType<typeof findByRole>,
+    keepCount: number,
+  ): Promise<void> {
+    for (let guard = 0; guard < 8; guard += 1) {
+      let { observation } = await this.driver.perceive();
+      const codes = codesOf(observation);
+      if (codes.length <= keepCount) return;
+      // Only prune a row that is still blank — never a filled option.
+      const last = codes[codes.length - 1]?.el;
+      const lastCode = (last?.state.value ?? '').trim();
+      const labels = findByRole(observation, 'textbox', { contains: 'label' })
+        .filter((c) => !codes.some((ci) => ci.el.handle === c.el.handle));
+      const lastLabel = labels[labels.length - 1]?.el;
+      const lastLabelVal = (lastLabel?.state.value ?? '').trim();
+      if (lastCode || lastLabelVal) return;
+      const removes = findCodedValueRemoveControls(observation);
+      if (removes.length === 0) return;
+      await this.driver.click(removes[removes.length - 1].handle);
+      await this.sleep(120);
+    }
   }
 
   private async executeFieldSetRequired(
@@ -1269,14 +1302,36 @@ export class Orchestrator {
   ): Promise<void> {
     if (field.required) {
       const { observation } = await this.driver.perceive();
-      const requiredCheckboxes = findByRole(observation, 'checkbox', { contains: 'require' });
+      // findByRole matches name OR groupText, so nameless Required checkboxes
+      // on Rosetta/Nexus (broken label[for]) still resolve.
+      let requiredCheckboxes = findByRole(observation, 'checkbox', { contains: 'require' });
+      // Prefer an unchecked Required over Hidden when both match loosely.
+      const preferred =
+        requiredCheckboxes.find((c) => /requir/i.test(c.el.name || c.el.groupText || '')) ??
+        requiredCheckboxes[0];
 
-      if (requiredCheckboxes.length > 0) {
-        const el = requiredCheckboxes[0].el;
+      if (preferred) {
+        const el = preferred.el;
         if (!el.state.checked) {
           await this.driver.check(el.handle, true);
           await this.sleep(200);
         }
+        // Verify the write stuck — silent required=false was ~47% of Rosetta
+        // required misses when the click hit the wrong or unbound control.
+        const { observation: after } = await this.driver.perceive();
+        const again = findByRole(after, 'checkbox', { contains: 'require' })
+          .find((c) => c.el.handle === el.handle) ??
+          findByRole(after, 'checkbox', { contains: 'require' })[0];
+        if (again && !again.el.state.checked) {
+          await this.driver.check(again.el.handle, true);
+          await this.sleep(150);
+        }
+      } else {
+        this.journal.note(
+          this.sourceOf(item).path,
+          `field.set_required: no Required checkbox found for "${field.label}" ` +
+          `(wanted required=true); leaving for commit-time verify`,
+        );
       }
     }
 
@@ -1714,7 +1769,7 @@ export class Orchestrator {
     }
 
     if (!reached) {
-      await this.escalateItem(`visit-nav:${visitId}`, 'acting', {
+      const decision = await this.escalateItem(`visit-nav:${visitId}`, 'acting', {
         key: `visit-nav:${visitId}`,
         fieldLabel: '(whole visit)',
         canonicalType: 'text',
@@ -1730,7 +1785,22 @@ export class Orchestrator {
         evidence: hops.length ? [`ascended via: ${hops.join(' -> ')}`] : ['no ascend candidate found'],
         phase: 'acting',
       }, /* blocking */ true);
-      return false;
+
+      // Human may have navigated to the visit list (or into this visit) while
+      // the gate was up. Do not skipSpan a fresh study after Approve.
+      const { observation: now } = await this.driver.perceive();
+      if (atVisitDetail(now, visit.name, visitNames)) {
+        this.currentVisitId = visitId;
+        this.currentFormId = null;
+        return true;
+      }
+      if (onVisitList(now)) {
+        reached = true;
+      } else if (!decision || decision.action === 'skip') {
+        return false;
+      } else {
+        return false;
+      }
     }
 
     // Remember what this surface offers. There is no working copy on the visit
@@ -1758,21 +1828,23 @@ export class Orchestrator {
     const link = nameMatches(listed);
     let opened = false;
     if (link) {
-      await this.driver.click(link.handle);
-      await this.sleep(500);
-      const { observation: after } = await this.driver.perceiveAfterSettle(250);
-      // Prefer positive structural proof (form-create control on the visit
-      // detail) over negating atVisitList — inert "Phases" chrome made the
-      // negation unreliable and blocked Screening after the create-control fix.
-      // Prefer positive form-create proof. Negating atVisitList alone is not
-      // enough when a poisoned createControl made the list witness fire on
-      // detail — require that we left the list OR landed on detail.
-      opened = atVisitDetail(after, visit.name, visitNames)
-        || (Boolean(link) && !onVisitList(after));
+      for (let attempt = 0; attempt < 2 && !opened; attempt += 1) {
+        await this.driver.click(link.handle);
+        await this.sleep(500 + attempt * 300);
+        const { observation: after } = await this.driver.perceiveAfterSettle(250 + attempt * 200);
+        // Prefer positive structural proof (form-create control on the visit
+        // detail) over negating atVisitList — inert "Phases" chrome made the
+        // negation unreliable and blocked Screening after the create-control fix.
+        // Prefer positive form-create proof. Negating atVisitList alone is not
+        // enough when a poisoned createControl made the list witness fire on
+        // detail — require that we left the list OR landed on detail.
+        opened = atVisitDetail(after, visit.name, visitNames)
+          || (Boolean(link) && !onVisitList(after));
+      }
     }
 
     if (!opened) {
-      await this.escalateItem(`visit-open:${visitId}`, 'acting', {
+      const decision = await this.escalateItem(`visit-open:${visitId}`, 'acting', {
         key: `visit-open:${visitId}`,
         fieldLabel: '(whole visit)',
         canonicalType: 'text',
@@ -1785,12 +1857,57 @@ export class Orchestrator {
         evidence: [`visit control ${link ? `"${link.name}" clicked` : 'not found'}`],
         phase: 'acting',
       }, /* blocking */ true);
-      return false;
+
+      // ROOT CAUSE of swapped/Nexus "208 skipped" after a human Approve on the
+      // visit-open gate: we used to ignore the decision and always return
+      // false → skipSpan the entire visit. Approve looked like consent to
+      // continue, but the schedule still skipped. Re-perceive first — the
+      // human may have opened the visit while the gate was up — and on
+      // retry/approve, attempt one more open before giving up.
+      const recovered = await this.confirmVisitOpenAfterGate(
+        visitId, visit.name, visitNames, onVisitList, nameMatches, decision,
+      );
+      if (!recovered) return false;
     }
 
     this.currentVisitId = visitId;
     this.currentFormId = null;
     return true;
+  }
+
+  /**
+   * After a blocking visit-open gate, decide whether the visit is now open.
+   * Surface evidence wins over the button label: Approve without the visit
+   * detail on screen still refuses (do not build into the wrong visit).
+   */
+  private async confirmVisitOpenAfterGate(
+    _visitId: string,
+    visitName: string,
+    visitNames: string[],
+    onVisitList: (o: Observation) => boolean,
+    nameMatches: (o: Observation) => ReturnType<typeof enumerateActionable>[number] | undefined,
+    decision: { action: string } | null,
+  ): Promise<boolean> {
+    const detailOk = (o: Observation) =>
+      atVisitDetail(o, visitName, visitNames);
+
+    let { observation: now } = await this.driver.perceive();
+    if (navGateAllowsContinue(decision, detailOk(now))) return true;
+
+    if (!navGateShouldRetryOpen(decision)) return false;
+
+    // retry / approve: one more click on the visit control if listed.
+    const link = nameMatches(now);
+    if (link) {
+      await this.driver.click(link.handle);
+      await this.sleep(500);
+      ({ observation: now } = await this.driver.perceiveAfterSettle(250));
+      if (navGateAllowsContinue(decision, detailOk(now))) return true;
+      // Left the list without a named detail witness — still accept when the
+      // create-control witness says we are no longer on the visit list.
+      if (!onVisitList(now) && link) return true;
+    }
+    return navGateAllowsContinue(decision, detailOk(now));
   }
 
   private async createVisit(visit: IrVisit): Promise<void> {
@@ -1939,7 +2056,7 @@ export class Orchestrator {
     if (!opened) {
       // Never claim a form is open when the read-back disagrees: that is the
       // failure that silently writes 195 fields into the wrong document.
-      await this.escalateItem(`form-open:${formId}`, 'acting', {
+      const decision = await this.escalateItem(`form-open:${formId}`, 'acting', {
         key: `form-open:${formId}`,
         fieldLabel: '(whole form)',
         canonicalType: 'text',
@@ -1958,7 +2075,23 @@ export class Orchestrator {
         ),
         phase: 'acting',
       }, /* blocking */ true);
-      return false;
+
+      let { observation: now } = await this.driver.perceive();
+      if (surfaceShowsForm(now, form.name, siblings, [visitName])) {
+        opened = true;
+      } else if (decision && decision.action !== 'skip') {
+        const retryCands = resolveFormOpenCandidates(now, form.name, [visitName]);
+        for (const cand of retryCands.slice(0, 2)) {
+          await this.driver.click(cand.handle);
+          await this.sleep(500);
+          ({ observation: now } = await this.driver.perceiveAfterSettle(250));
+          if (surfaceShowsForm(now, form.name, siblings, [visitName])) {
+            opened = true;
+            break;
+          }
+        }
+      }
+      if (!opened) return false;
     }
 
     this.currentFormId = formId;

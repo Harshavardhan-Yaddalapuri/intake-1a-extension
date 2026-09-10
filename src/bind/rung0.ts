@@ -30,6 +30,7 @@ import {
   explainRanking,
   matchesHintExact,
   matchesHintLoose,
+  matchesHintWord,
   type RankedCandidate,
 } from './ranking';
 
@@ -57,9 +58,18 @@ export function findByRole(
   for (const el of obs.elements) {
     if (el.role !== role) continue;
     if (nameFilter) {
+      // Accessible name first. Hostile designers often leave `for=` pointing at
+      // a missing id (Required/Hidden), so the checkbox name is empty while
+      // groupText still carries the sibling label — accept that as a match
+      // rather than silently skipping field.set_required.
       const name = el.name.toLowerCase();
-      if (nameFilter.contains && !name.includes(nameFilter.contains.toLowerCase())) continue;
-      if (nameFilter.equals && name !== nameFilter.equals.toLowerCase()) continue;
+      const group = (el.groupText ?? '').toLowerCase();
+      const haystack = name || group;
+      if (nameFilter.contains && !haystack.includes(nameFilter.contains.toLowerCase())) continue;
+      if (nameFilter.equals) {
+        const eq = nameFilter.equals.toLowerCase();
+        if (name !== eq && group !== eq) continue;
+      }
     }
     // Role match with no name constraint: tentative.
     // Role match with name constraint: structural if name also matches.
@@ -67,7 +77,9 @@ export function findByRole(
     let evidence = `role=${el.role}`;
     if (nameFilter) {
       confidence = 'structural';
-      evidence += `, name~="${el.name}"`;
+      evidence += el.name
+        ? `, name~="${el.name}"`
+        : `, groupText~="${el.groupText ?? ''}"`;
     } else {
       evidence += `, name="${el.name}"`;
     }
@@ -992,10 +1004,28 @@ export function findAddCodedValueControl(obs: Observation): ObservationElement |
     .find((el) => {
       const n = el.name.toLowerCase();
       if (!/\badd\b/.test(n)) return false;
-      if (!n.includes('value')) return false;
+      // Rosetta: "+ Add Value"; Nexus: "+ Add Choice". Either appends a row.
+      if (!(n.includes('value') || n.includes('choice') || n.includes('option'))) return false;
       if (n.includes('paste') || n.includes('apply')) return false;
       return true;
     });
+}
+
+/** True when a button removes one coded-value / choice row. */
+export function isCodedValueRemoveControl(name: string): boolean {
+  const n = name.trim().toLowerCase();
+  if (!n) return false;
+  // Hostile envs label the control "x" / "×" / "✕" with no remove word.
+  if (n === 'x' || n === '×' || n === '✕' || n === '✖' || n === '⨯') return true;
+  // Lexical table owns "remove"/"delete" — never compare those literals here.
+  return matchesHintWord(n, 'delete_element') || matchesHintLoose(n, 'delete_element');
+}
+
+/** Last remove control in document order — the row just appended by nudge. */
+export function findCodedValueRemoveControls(obs: Observation): ObservationElement[] {
+  return obs.elements.filter(
+    (e) => e.role === 'button' && isCodedValueRemoveControl(e.name),
+  );
 }
 
 // ---------------------------------------------------------------------------
