@@ -28,6 +28,8 @@ import {
   largestControlCluster,
   rankCandidates,
   explainRanking,
+  matchesHintExact,
+  matchesHintLoose,
   type RankedCandidate,
 } from './ranking';
 
@@ -417,7 +419,7 @@ export function rankAscendCandidates(
   const excluded = new Set((cluster?.members ?? []).map((e) => e.handle));
   const isBreadcrumb = (name: string) => {
     const n = normaliseText(name);
-    return n.includes('back') || n.startsWith('<-') || n.startsWith('←');
+    return matchesHintLoose(n, 'ascend') || n.startsWith('<-') || n.startsWith('←');
   };
   const safe = pool.filter((e) => !excluded.has(e.handle) || isBreadcrumb(e.name));
   if (safe.length === 0) return [];
@@ -431,12 +433,9 @@ export function rankAscendCandidates(
       if (known.some((n) => name.includes(n))) score += ASCEND_PARENT_NAME_BONUS;
       // Breadcrumb / back controls actually move; inert tabs named "Phases"
       // match visit_list lexically and do nothing (env-rosetta toolbar).
-      if (name.includes('back') || name.startsWith('<-') || name.startsWith('←')) {
+      if (matchesHintLoose(name, 'ascend') || name.startsWith('<-') || name.startsWith('←')) {
         score += ASCEND_PARENT_NAME_BONUS;
-      } else if (
-        name === 'phases' || name === 'sites' || name === 'data entry'
-        || name === 'trial roadmap' || name === 'study plan'
-      ) {
+      } else if (matchesHintExact(name, 'chrome')) {
         score -= ASCEND_PARENT_NAME_BONUS;
       }
       return { el: r.el, score };
@@ -506,9 +505,7 @@ export function atVisitDetail(
     // Must look like create AND mention a form-ish noun (not visit/phase).
     if (!(n.includes('+') || /(?:^|\s)(add|new|create)(?:\s|$)/.test(n))) return false;
     if (/(?:^|\s)(visit|phase|cycle|timepoint|event)(?:\s|$)/.test(n)) return false;
-    return /(?:^|\s)(form|sheet|record|instrument|document|crf|source)(?:\s|$)/.test(n)
-      || n.includes('record sheet')
-      || n.includes('instrument');
+    return /(?:^|\s)(form|sheet|record|instrument|document|crf|source)(?:\s|$)/.test(n);
   });
   if (!hasFormCreate) return false;
   if (!visitName) return true;

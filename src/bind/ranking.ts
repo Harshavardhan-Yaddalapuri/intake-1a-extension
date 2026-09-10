@@ -44,7 +44,12 @@ export type HintKey =
   | 'template'
   | 'window_start'
   | 'window_end'
-  | 'repeating';
+  | 'repeating'
+  | 'ascend'
+  | 'chrome'
+  | 'non_palette_action'
+  | 'delete_element'
+  | 'panel_field';
 
 /** Weak lexical priors. A word here may raise a candidate's rank. A word here
  *  may NEVER remove a candidate from the pool. Words are deliberately generic
@@ -52,7 +57,7 @@ export type HintKey =
 export const LEXICAL_HINTS: Record<HintKey, readonly string[]> = {
   commit: ['save', 'commit', 'persist', 'apply', 'publish', 'submit', 'confirm', 'lock', 'freeze', 'create', 'finish', 'done', 'ok'],
   discard: ['cancel', 'discard', 'close', 'back', 'abandon', 'revert', 'undo'],
-  palette: ['element', 'library', 'palette', 'control', 'widget', 'component', 'field', 'question', 'item'],
+  palette: ['element', 'node', 'library', 'palette', 'control', 'widget', 'component', 'field', 'question', 'item'],
   visit_create: ['visit', 'phase', 'timepoint', 'event', 'add', 'new', 'create', '+'],
   visit_open: ['visit', 'phase', 'timepoint', 'open', 'edit', 'view'],
   form_create: ['form', 'document', 'source', 'sheet', 'record', 'crf', 'add', 'new', 'create', '+'],
@@ -88,7 +93,75 @@ export const LEXICAL_HINTS: Record<HintKey, readonly string[]> = {
   window_start: ['start', 'from', 'begin', 'day 1', 'lower', 'earliest', 'window'],
   window_end: ['end', 'to', 'until', 'finish', 'upper', 'latest', 'window'],
   repeating: ['repeat', 'recurring', 'multiple', 'many'],
+  // Controls that move UP and out of the surface being worked on. A breadcrumb
+  // out of a form designer is the reliable way back to the visit list, and the
+  // one control a palette probe must never click.
+  ascend: ['back', 'return', 'up'],
+  // Application chrome that rides along in a builder's control cluster: top
+  // nav, inert tabs that lexically resemble a visit list, page/section rails.
+  chrome: [
+    'phases', 'sites', 'data entry', 'trial roadmap', 'study plan',
+    'page', 'page 1', '+ page', '+ section',
+  ],
+  // Controls that act on the working copy rather than adding to it. Clicking
+  // one during a palette probe persists, previews or discards instead of
+  // placing, and the probe reads the wrong answer.
+  non_palette_action: [
+    'preview', 'deploy', 'stash', 'lock', 'freeze', 'bank it', 'save',
+    'activate', 'go live', 'publish', 'done', 'create', 'commit', 'apply',
+    'submit',
+  ],
+  delete_element: ['delete', 'remove', 'erase'],
+  // Property-panel inputs. They sit beside the canvas tile they describe, so
+  // "which control IS the placed field" must not answer with one of these.
+  panel_field: ['label', 'formula', 'expression', 'visibility'],
 };
+
+/** Normalised form used by every hint predicate: collapse whitespace, lowercase. */
+function normaliseHintText(s: string): string {
+  return s.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * Hint predicates.
+ *
+ * Callers outside this module must never write an English UI word inline —
+ * test/enumeration-guard.test.mjs fails the build if they do. They ask these
+ * predicates instead, so every word the agent guesses about a platform's
+ * vocabulary is declared in LEXICAL_HINTS above and nowhere else.
+ *
+ * These read a name and return a boolean, so a caller CAN use one as a filter.
+ * That is a deliberate, narrow allowance: a probe that clicks a Save button
+ * instead of a palette tile destroys the surface it was measuring, and no
+ * amount of re-ranking recovers from it. Use them to rank wherever ranking
+ * suffices; exclude only where a wrong click is unrecoverable.
+ */
+
+/** The whole name is one of the hint words. Strictest, and the safest to
+ *  exclude on: "Save" is the save control, "Save Draft As Template" is not. */
+export function matchesHintExact(name: string, ...keys: readonly HintKey[]): boolean {
+  const n = normaliseHintText(name);
+  if (!n) return false;
+  return keys.some((k) => LEXICAL_HINTS[k].some((w) => n === w));
+}
+
+/** A hint word appears as a whole word. "Delete Element" matches 'delete';
+ *  "Undeleted" does not. */
+export function matchesHintWord(name: string, ...keys: readonly HintKey[]): boolean {
+  const n = normaliseHintText(name);
+  if (!n) return false;
+  return keys.some((k) => LEXICAL_HINTS[k].some((w) => {
+    const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?:^|\\s)${escaped}(?:\\s|$)`).test(n);
+  }));
+}
+
+/** A hint word appears anywhere in the name. Loosest — prefer the others. */
+export function matchesHintLoose(name: string, ...keys: readonly HintKey[]): boolean {
+  const n = normaliseHintText(name);
+  if (!n) return false;
+  return keys.some((k) => LEXICAL_HINTS[k].some((w) => n.includes(w)));
+}
 
 /** Signal weights. Structural evidence outranks vocabulary, deliberately:
  *  a control that appeared in the diff we just caused is better evidence than

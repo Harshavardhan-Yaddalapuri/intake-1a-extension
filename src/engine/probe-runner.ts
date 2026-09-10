@@ -34,7 +34,15 @@ import {
   type CommitProbeResult,
 } from '../bind/rung1';
 import { TabDriver } from './tab-driver';
-import { enumerateActionable, enumerateActions, rankCandidates, largestControlCluster } from '../bind/ranking';
+import {
+  enumerateActionable,
+  enumerateActions,
+  rankCandidates,
+  largestControlCluster,
+  matchesHintExact,
+  matchesHintWord,
+  matchesHintLoose,
+} from '../bind/ranking';
 import { rankCommitCandidates } from '../bind/rung0';
 
 export interface DiscoveredPaletteItem {
@@ -121,25 +129,13 @@ export function isSafePaletteProbeCandidate(name: string): boolean {
   const n = (name || '').trim().toLowerCase();
   if (!n) return false;
   if (n.startsWith('<-') || n.startsWith('←')) return false;
-  if (n === 'back' || n.startsWith('back ') || n.endsWith(' back')) return false;
-  // Persist / preview / deploy chrome — placing is not their job.
-  // Rosetta labels activate as "Go Live" (not "Activate"); clicking it while
-  // dirty inserts a toast that shifts every structural handle under the
-  // builder bar, so later Delete Element clicks go stale in live Chrome.
-  if (
-    n === 'preview' || n === 'deploy' || n === 'stash' || n === 'lock'
-    || n === 'freeze' || n === 'bank it' || n === 'save' || n === 'activate'
-    || n === 'go live' || n === 'publish' || n === 'done' || n === 'create'
-  ) {
-    return false;
-  }
-  // Top-nav and page chrome ride along in some builder clusters.
-  if (
-    n === 'phases' || n === 'sites' || n === 'data entry' || n === 'trial roadmap'
-    || n === 'page 1' || n === '+ page' || n === '+ section'
-  ) {
-    return false;
-  }
+  if (matchesHintWord(n, 'ascend')) return false;
+  // Persist / preview / deploy chrome — placing is not their job. Clicking one
+  // while the working copy is dirty commits, previews or discards it, and
+  // every probe after that reads a surface the agent did not mean to be on.
+  // Matched EXACTLY, not loosely: a tile legitimately named "Save Point" is a
+  // field, and excluding it would cost a field the brief penalises heavily.
+  if (matchesHintExact(n, 'non_palette_action', 'chrome')) return false;
   return true;
 }
 
@@ -150,15 +146,13 @@ export function findProbeDeleteAction(obs: Observation): { name: string; handle:
   const del = enumerateActions(obs).find((e) => {
     const n = (e.name || '').trim().toLowerCase();
     if (!n) return false;
-    if (n.includes('delete') && /(element|node|field|control|item|widget)/.test(n)) {
-      return true;
+    // "Delete Element" / "Delete Node" / "Remove Field" — a delete verb applied
+    // to a control noun — or a bare delete verb when the panel names no object.
+    if (matchesHintWord(n, 'delete_element')) {
+      return matchesHintWord(n, 'palette') || matchesHintExact(n, 'delete_element')
+        || n.split(' ').length <= 2;
     }
-    return (
-      n === 'delete'
-      || n === 'delete selected'
-      || n === 'remove element'
-      || n === 'remove node'
-    );
+    return false;
   });
   return del ? { name: del.name, handle: del.handle } : null;
 }
@@ -175,11 +169,11 @@ export function findPlacedProbeSelectTarget(
   const diff = diffObservations(beforePlace, afterPlace);
   const added = new Set(diff.added);
 
-  const isDeleteChrome = (n: string) =>
-    n.includes('delete') || n === 'remove' || n === 'remove element' || n === 'remove node';
+  const isDeleteChrome = (n: string) => matchesHintWord(n, 'delete_element');
 
   const isNavOrCreate = (n: string) =>
-    n.startsWith('<-') || n.startsWith('+') || n.includes('back') || n.includes('page');
+    n.startsWith('<-') || n.startsWith('+')
+    || matchesHintWord(n, 'ascend') || matchesHintWord(n, 'chrome');
 
   // Canvas previews are VALUE_ROLES (textbox/…) which enumerateActionable
   // excludes — look at obs.elements directly. Never pick Delete Element/Node
@@ -194,7 +188,7 @@ export function findPlacedProbeSelectTarget(
     if (!n || isDeleteChrome(n) || isNavOrCreate(n)) return false;
     if (n === 'filter...' || n.includes('filter')) return false;
     // Panel fields, not the canvas tile.
-    if (n === 'label' || n === 'formula' || n === 'expression' || n === 'visibility') {
+    if (matchesHintExact(n, 'panel_field')) {
       return false;
     }
     if (prefer.has(e.role)) return true;
