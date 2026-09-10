@@ -18,6 +18,7 @@ import {
 import {
   isSafePaletteProbeCandidate,
   findWizardAdvanceControl,
+  fieldPaletteSeemsOpen,
 } from '../dist/probe-runner.mjs';
 import { rankCommitCandidates } from '../dist/bind-rung0.mjs';
 import { matchesHintWord } from '../dist/bind-ranking.mjs';
@@ -128,4 +129,22 @@ test('wizard: hamburger reveals Commit for ranking', () => {
   if (doneRank >= 0) {
     assert.ok(commitRank >= 0 && commitRank < doneRank, 'Commit must outrank Done');
   }
+});
+
+test('wizard: fieldPaletteSeemsOpen is false until library modal opens', () => {
+  const w = loadWizard();
+  openBuilder(w);
+  const closed = observe(w.document);
+  assert.equal(
+    fieldPaletteSeemsOpen(closed),
+    false,
+    'builder chrome alone must not look like an open tile library',
+  );
+  w.document.querySelector('#builder-add-element').click();
+  const open = observe(w.document);
+  assert.equal(
+    fieldPaletteSeemsOpen(open),
+    true,
+    `library tiles must count as open palette; names=${open.elements.map((e) => e.name).filter(Boolean).slice(0, 20)}`,
+  );
 });

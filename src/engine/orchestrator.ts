@@ -850,7 +850,8 @@ export class Orchestrator {
         typeof stored?.openRouterApiKey === 'string' ? stored.openRouterApiKey : null;
 
       if (apiKey) {
-        const { observation: paletteObs } = await this.driver.perceive();
+        let { observation: paletteObs } = await this.driver.perceive();
+        paletteObs = await this.probeRunner.ensureFieldPaletteOpen(paletteObs);
         const pool = rankCandidates(enumerateActionable(paletteObs), { hint: 'palette' });
         const llmRanked = await rankWithLlm(field.canonical_type, pool, {
           apiKey,
@@ -943,6 +944,13 @@ export class Orchestrator {
     await applyTransition(this.adapter, this.runState, itemKey, 'begin_binding');
     await applyTransition(this.adapter, this.runState, itemKey, 'bound');
     await applyTransition(this.adapter, this.runState, itemKey, 'begin_acting');
+
+    // Modal libraries (FormCraft "+ Add Element") close after each place —
+    // reopen so the type tile is resolvable by name.
+    {
+      const { observation: beforePlace } = await this.driver.perceive();
+      await this.probeRunner.ensureFieldPaletteOpen(beforePlace);
+    }
 
     const actOk = await this.executeRecipe(typeBinding.recipe, field);
     const actEvent: ItemEvent = actOk ? 'act_done' : 'act_failed';
@@ -1947,37 +1955,47 @@ export class Orchestrator {
     }
 
     // Fill in the visit name.
-    const { observation: formObs } = await this.driver.perceive();
-    const textPool = enumerateByRoles(formObs, ['textbox', 'searchbox']);
+    let { observation: formObs } = await this.driver.perceive();
+    let textPool = enumerateByRoles(formObs, ['textbox', 'searchbox']);
     say(`text inputs after opening=[${textPool.map((e) => e.name).join(', ')}]`);
     const nameBox = rankCandidates(textPool, { hint: 'name_input' })[0]?.el;
     say(`name input=${nameBox ? JSON.stringify(nameBox.name) : 'NONE FOUND'}`);
     if (nameBox) {
       const wrote = await this.driver.setValue(nameBox.handle, visit.name);
       if (!wrote.ok) say(`name write FAILED: ${wrote.error ?? 'unknown'}`);
+      // Contenteditable hosts (Prism Wave Name) rebuild the dialog on input —
+      // refresh before writing window bounds so handles are not stale.
+      ({ observation: formObs } = await this.driver.perceive());
+      textPool = enumerateByRoles(formObs, ['textbox', 'searchbox']);
     }
 
     // Fill in the visit window. Both bounds are ranked over the same pool and
     // the top two distinct candidates are used, so a platform naming them
     // anything at all still gets values written; the read-back confirms.
+    const nameNowHandle = rankCandidates(textPool, { hint: 'name_input' })[0]?.el?.handle;
     const startBox = rankCandidates(textPool, { hint: 'window_start' })[0]?.el;
-    const endCandidates = rankCandidates(textPool, { hint: 'window_end' });
-    const endBox = (endCandidates.find((c) => c.el.handle !== startBox?.handle) ?? endCandidates[0])?.el;
-    if (startBox && startBox.handle !== nameBox?.handle) {
+    if (startBox && startBox.handle !== nameNowHandle) {
       await this.driver.setValue(startBox.handle, String(visit.window_start_day));
+      ({ observation: formObs } = await this.driver.perceive());
+      textPool = enumerateByRoles(formObs, ['textbox', 'searchbox']);
     }
-    if (endBox && endBox.handle !== nameBox?.handle && endBox.handle !== startBox?.handle) {
-      await this.driver.setValue(endBox.handle, String(visit.window_end_day));
+    const nameAfterStart = rankCandidates(textPool, { hint: 'name_input' })[0]?.el?.handle;
+    const startAfter = rankCandidates(textPool, { hint: 'window_start' })[0]?.el?.handle;
+    const endFresh = rankCandidates(textPool, { hint: 'window_end' })
+      .map((c) => c.el)
+      .find((el) => el.handle !== nameAfterStart && el.handle !== startAfter);
+    if (endFresh) {
+      await this.driver.setValue(endFresh.handle, String(visit.window_end_day));
     }
 
     // Click save. Read the name field back FIRST: a platform that silently
     // drops the write (its own draft never updated) looks identical to one
     // that saved nothing, and only this distinguishes them.
     const { observation: saveObs } = await this.driver.perceive();
-    const nameNow = nameBox
-      ? enumerateByRoles(saveObs, ['textbox', 'searchbox'])
-          .find((e) => e.handle === nameBox.handle)?.state.value
-      : undefined;
+    const nameNow = rankCandidates(
+      enumerateByRoles(saveObs, ['textbox', 'searchbox']),
+      { hint: 'name_input' },
+    )[0]?.el?.state.value;
     say(`name reads back as ${JSON.stringify(nameNow ?? null)} (wanted ${JSON.stringify(visit.name)})`);
 
     const saveBtn = this.pickDialogCommit(saveObs);
@@ -2151,7 +2169,7 @@ export class Orchestrator {
   }
 
   private async discoverFormBuilder(): Promise<void> {
-    const { observation } = await this.driver.perceive();
+    let { observation } = await this.driver.perceive();
 
     // Adopt only what the BUILDER owns. Re-binding everything from this screen
     // rebinds controls that live elsewhere against whatever happens to look
@@ -2179,7 +2197,9 @@ export class Orchestrator {
       }
     }
 
-    // Bind all 13 canonical types in the palette
+    // Bind all 13 canonical types in the palette. Open a modal library first
+    // when needed so name hypotheses can see Orbit Set / Pick One tiles.
+    observation = await this.probeRunner.ensureFieldPaletteOpen(observation);
     for (const type of CANONICAL_TYPES) {
       if (!this.typeBindings[type]) {
         const tb = bindFieldAdd(observation, type);

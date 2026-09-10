@@ -158,6 +158,27 @@ test('ACT: setValue on non-input throws WriteFailedError', async () => {
   );
 });
 
+test('ACT: setValue writes contenteditable textbox hosts (hostile-a11y cells)', async () => {
+  const doc = makeDoc(
+    '<div id="x" contenteditable="true"><span class="cell-text"></span></div>',
+  );
+  const host = doc.getElementById('x');
+  let inputFired = false;
+  let drafted = '';
+  host.addEventListener('input', () => {
+    inputFired = true;
+    drafted = (host.textContent || '').trim();
+  });
+  const ctx = makeCtx(doc);
+  const textbox = ctx.obs.elements.find((e) => e.role === 'textbox');
+  assert.ok(textbox, 'contenteditable must be perceived as textbox');
+  const result = await setValue(ctx, textbox.handle, 'Screening');
+  assert.equal(result.ok, true);
+  assert.equal(inputFired, true, 'input event must fire so platform draft updates');
+  assert.equal(drafted, 'Screening');
+  assert.equal((host.textContent || '').trim(), 'Screening');
+});
+
 test('ACT: setValue is NOT retried (no double-submit)', async () => {
   const doc = makeDoc('<input type="text" id="x" />');
   const input = doc.getElementById('x');

@@ -43,7 +43,7 @@ import {
   matchesHintWord,
   matchesHintLoose,
 } from '../bind/ranking';
-import { rankCommitCandidates } from '../bind/rung0';
+import { rankCommitCandidates, bindFieldPaletteOpen } from '../bind/rung0';
 
 export interface DiscoveredPaletteItem {
   name: string;
@@ -317,11 +317,63 @@ export function probeTileResiduePresent(
   return current.elements.length > beforePlace.elements.length;
 }
 
+/**
+ * True when an element library / palette grid already looks open.
+ *
+ * FormCraft hides tiles behind "+ Add Element"; Zephyr/Nexus keep a strip
+ * always visible. Counting non-chrome buttons (incl. nameless icon tiles)
+ * distinguishes the two without hardcoding platform nouns.
+ */
+export function fieldPaletteSeemsOpen(obs: Observation): boolean {
+  const actionable = enumerateActionable(obs);
+  const tileLike = actionable.filter((e) => {
+    const n = (e.name || '').trim().toLowerCase();
+    if (e.role !== 'button' && e.role !== 'generic') return false;
+    if (!n) return true; // icon-only library tiles
+    if (n.startsWith('<-') || n.startsWith('←')) return false;
+    if (n.startsWith('+')) return false; // library opener, not a tile
+    if (matchesHintExact(n, 'non_palette_action', 'chrome', 'commit', 'discard', 'wizard_advance')) {
+      return false;
+    }
+    if (matchesHintWord(n, 'ascend') || matchesHintWord(n, 'menu')) return false;
+    return true;
+  });
+  return tileLike.length >= 5;
+}
+
 export class ProbeRunner {
+
   private driver: TabDriver;
 
   constructor(driver: TabDriver) {
     this.driver = driver;
+  }
+
+  /**
+   * Open the element library when tiles are not yet on screen.
+   * Uses field_palette.open ranking (no platform id hardcoding). Safe on
+   * always-visible palettes: fieldPaletteSeemsOpen short-circuits.
+   */
+  async ensureFieldPaletteOpen(currentObs: Observation): Promise<Observation> {
+    if (fieldPaletteSeemsOpen(currentObs)) return currentObs;
+
+    const binding = bindFieldPaletteOpen(currentObs);
+    const step = binding?.recipe?.[0];
+    if (!step || step.step === 'wait') return currentObs;
+
+    const pool = enumerateActionable(currentObs);
+    let target = step.evidence_name
+      ? pool.find((e) => (e.name || '').trim() === (step.evidence_name || '').trim())
+      : undefined;
+    if (!target) {
+      target = rankCandidates(pool, { hint: 'palette' })[0]?.el;
+    }
+    if (!target) return currentObs;
+
+    const clicked = await this.driver.click(target.handle);
+    if (!clicked.ok) return currentObs;
+    await this.sleep(250);
+    return (await this.driver.perceiveAfterSettle(200)).observation;
   }
 
   /**
@@ -334,6 +386,11 @@ export class ProbeRunner {
   }> {
     const bindings: Partial<Record<CanonicalType, BindingRecord>> = {};
     const discovered: DiscoveredPaletteItem[] = [];
+
+    // FormCraft (env-wizard): tiles live in a modal behind "+ Add Element".
+    // Probing the closed builder only sees chrome → radio/select never bind
+    // ("Orbit Set" / "Pick One") and field throughput stalls ~18.
+    currentObs = await this.ensureFieldPaletteOpen(currentObs);
 
     // Every actionable control is a palette candidate.
     //
@@ -383,10 +440,16 @@ export class ProbeRunner {
         //    place/delete cycles replaceChildren the builder; a handle from
         //    the opening observation can point at the wrong control once a
         //    toast or leftover tile has shifted paths (live Chrome / rosetta).
-        const before = await this.driver.perceive();
-        const liveBtn = enumerateActionable(before.observation).find(
-          (e) => (e.name || '').trim() === (btn.name || '').trim(),
-        ) ?? btn;
+        let before = await this.driver.perceive();
+        // Placing a tile may close a modal library — reopen before the next trial.
+        const btnName = (btn.name || '').trim();
+        const findBtn = (obs: Observation) =>
+          enumerateActionable(obs).find((e) => (e.name || '').trim() === btnName);
+        if (btnName && !findBtn(before.observation)) {
+          const opened = await this.ensureFieldPaletteOpen(before.observation);
+          before = { ...before, observation: opened };
+        }
+        const liveBtn = findBtn(before.observation) ?? btn;
 
         // 2. Click the candidate palette tile
         const clickRes = await this.driver.click(liveBtn.handle);
