@@ -100,10 +100,13 @@ test('hostile-a11y: place Glyph Line + set_label via groupText Label persists in
   assert.equal((await click(ctx(w), tile.handle)).ok, true);
   const after = observe(w.document);
 
-  const labelHits = findByRole(after, 'textbox', { contains: 'label' });
-  assert.ok(labelHits.length >= 1, `Label cell via groupText; got ${labelHits.map((c) => c.el.name + '/' + c.el.groupText)}`);
-  const labelEl = labelHits.find((c) => /label/i.test(c.el.groupText || '')) ?? labelHits[0];
-  assert.equal((await setValue(ctx(w), labelEl.el.handle, 'Subject Initials')).ok, true);
+  // Prism: accessible name is the value ("Glyph Line"); only groupText says Label.
+  // findByRole uses name||groupText (blank-name fallback), so use groupText directly.
+  const labelEl = after.elements.find(
+    (e) => e.role === 'textbox' && /^label\b/i.test((e.groupText || '').trim()),
+  );
+  assert.ok(labelEl, `Label cell via groupText; have=${after.elements.filter((e) => e.role === 'textbox').map((e) => e.name + '/' + e.groupText)}`);
+  assert.equal((await setValue(ctx(w), labelEl.handle, 'Subject Initials')).ok, true);
 
   const setLabel = bindFieldSetLabel(observe(w.document));
   assert.ok(setLabel, 'field.set_label binds');

@@ -1006,17 +1006,31 @@ export class Orchestrator {
   ): Promise<void> {
     const { observation } = await this.driver.perceive();
 
-    // Prefer groupText/name "Label" (findByRole matches either). Prism keeps
-    // the current value as the accessible name ("Glyph Line") so a name-only
-    // includes("label") check misses the cell and the fallback wrote into the
-    // Fragments filter instead — fields never got IR labels.
-    const byRole = findByRole(observation, 'textbox', { contains: 'label' });
-    const labelInputs = byRole
+    // 1) Name contains "label" (Rosetta / swapped / FormCraft when so named).
+    // 2) groupText is Label while name is the current value (Prism zero-ARIA).
+    //    findByRole no longer OR-matches groupText on named controls — that
+    //    flooded wizard coded-value "option label" rows and wrong min/type hits.
+    // 3) Fallback: first non-filter textbox (FormCraft "Question Text").
+    const notFilter = (e: { name: string; groupText?: string }) => {
+      const blob = `${e.name} ${e.groupText ?? ''}`.toLowerCase();
+      return !blob.includes('filter') && !blob.includes('search') && !blob.includes('paste')
+        && !blob.includes('fragment');
+    };
+
+    const byName = findByRole(observation, 'textbox', { contains: 'label' })
       .map((c) => c.el)
-      .filter((e) => {
-        const blob = `${e.name} ${e.groupText ?? ''}`.toLowerCase();
-        return !blob.includes('filter') && !blob.includes('search') && !blob.includes('paste');
-      });
+      .filter(notFilter);
+
+    const byGroup = observation.elements.filter((e) => {
+      if (e.role !== 'textbox' || !notFilter(e)) return false;
+      const g = (e.groupText ?? '').trim();
+      if (!/^label\b/i.test(g) && g.toLowerCase() !== 'label') return false;
+      // Prefer when name is blank OR looks like a value (not the word label).
+      const n = (e.name || '').trim().toLowerCase();
+      return !n || !n.includes('label');
+    });
+
+    const labelInputs = byName.length > 0 ? byName : byGroup;
 
     if (labelInputs.length > 0) {
       await this.driver.setValue(labelInputs[0].handle, field.label);
@@ -1024,22 +1038,9 @@ export class Orchestrator {
       return;
     }
 
-    // Fallback: textbox whose groupText is exactly-ish Label, else first
-    // non-filter textbox that is not the palette filter (group Fragments).
-    const byGroup = observation.elements.filter(
-      (e) => e.role === 'textbox' && /\blabel\b/i.test(e.groupText ?? ''),
-    );
-    if (byGroup.length > 0) {
-      await this.driver.setValue(byGroup[0].handle, field.label);
-      await this.sleep(200);
-      return;
-    }
-
     const candidateTextboxes = observation.elements.filter((e) => {
       if (e.role !== 'textbox') return false;
-      const blob = `${e.name} ${e.groupText ?? ''}`.toLowerCase();
-      if (blob.includes('filter') || blob.includes('search') || blob.includes('fragment')) return false;
-      return true;
+      return notFilter(e);
     });
     if (candidateTextboxes.length > 0) {
       await this.driver.setValue(candidateTextboxes[0].handle, field.label);
@@ -1346,8 +1347,8 @@ export class Orchestrator {
   ): Promise<void> {
     if (field.required) {
       let { observation } = await this.driver.perceive();
-      // findByRole matches name OR groupText, so nameless Required checkboxes
-      // on Rosetta/Nexus (broken label[for]) still resolve.
+      // findByRole uses name, or groupText when name is blank — nameless
+      // Required checkboxes on Rosetta/Nexus (broken label[for]) still resolve.
       let requiredCheckboxes = findByRole(observation, 'checkbox', { contains: 'require' });
       // FormCraft wizard: one property per step. Required sits after label/type
       // but BEFORE range. set_range may already have advanced past it — prefer

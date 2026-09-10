@@ -64,16 +64,17 @@ export function findByRole(
       // rather than silently skipping field.set_required.
       const name = el.name.toLowerCase();
       const group = (el.groupText ?? '').toLowerCase();
-      // Match name OR groupText. Prism Label cells keep the field value as
-      // accessible name ("Glyph Line") while only groupText says "Label" —
-      // `name || group` preferred the value and skipped field.set_label.
-      if (nameFilter.contains) {
-        const c = nameFilter.contains.toLowerCase();
-        if (!name.includes(c) && !group.includes(c)) continue;
-      }
+      // Prefer accessible name. When it is blank (hostile broken label[for]),
+      // fall back to groupText — same rule as rankCandidates. Do NOT OR-match
+      // name|groupText: on named ARIA UIs (FormCraft) that floods min/label/type
+      // queries with unrelated controls whose ancestor group mentions the word.
+      // Prism Label (name=value, groupText="Label") is handled in
+      // executeFieldSetLabel via an explicit groupText pass.
+      const haystack = name || group;
+      if (nameFilter.contains && !haystack.includes(nameFilter.contains.toLowerCase())) continue;
       if (nameFilter.equals) {
         const eq = nameFilter.equals.toLowerCase();
-        if (name !== eq && group !== eq) continue;
+        if (haystack !== eq) continue;
       }
     }
     // Role match with no name constraint: tentative.
@@ -747,21 +748,14 @@ export function bindFieldAdd(obs: Observation, canonicalType: CanonicalType): Bi
   // right control sat unused in the same palette.
   const scored: Array<{ el: ObservationElement; score: number; why: string }> = [];
 
-  for (const el of obs.elements) {
-    // a11y-hostile palettes (Prism Fragments) expose tiles as role=generic
-    // cursor:pointer divs — same actionable surface as <button>, just no
-    // host-language role. Excluding them left every field.add NULL and the
-    // live run at fields=0 despite tiles being visible.
-    if (el.role !== 'button' && el.role !== 'generic') continue;
+  // Score buttons first. Prism Fragments expose palette tiles as role=generic
+  // pointer divs — accept those only when no button candidate scored, so
+  // named-ARIA palettes (FormCraft / Rosetta / swapped) are not flooded by
+  // decorative generics that share synonym substrings.
+  const scoreEl = (el: ObservationElement) => {
     const name = el.name.toLowerCase();
-
     const own = synonymHits(canonicalType, name) + (name.includes(typeLower) ? 1 : 0);
-    if (own === 0) continue;
-
-    // A control that answers some OTHER canonical type more distinctively is
-    // that type's control, not ours. Subtracting rather than excluding keeps
-    // it in the pool: if this reasoning is wrong on an unseen platform, it is
-    // still reachable, just last.
+    if (own === 0) return;
     let rival = 0;
     let rivalOf = '';
     for (const other of Object.keys(SYNONYMS) as CanonicalType[]) {
@@ -769,16 +763,22 @@ export function bindFieldAdd(obs: Observation, canonicalType: CanonicalType): Bi
       const hits = synonymHits(other, name);
       if (hits > rival) { rival = hits; rivalOf = other; }
     }
-
-    // An exact name match is the strongest name-evidence there is.
     const exact = name.trim() === typeLower ? 1 : 0;
-
     scored.push({
       el,
       score: own - rival + exact,
       why: `name~="${el.name}" (${own} match${own === 1 ? '' : 'es'} for ${canonicalType}` +
         (rival > 0 ? `, ${rival} for ${rivalOf}` : '') + ')',
     });
+  };
+
+  for (const el of obs.elements) {
+    if (el.role === 'button') scoreEl(el);
+  }
+  if (scored.length === 0) {
+    for (const el of obs.elements) {
+      if (el.role === 'generic') scoreEl(el);
+    }
   }
 
   if (scored.length === 0) return null;

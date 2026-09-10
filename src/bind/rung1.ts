@@ -150,9 +150,16 @@ function matchesHint(name: string, hint: HintKey): boolean {
  *  editor had appeared, which is precisely the name-over-structure mistake
  *  the probe exists to correct. */
 function namesSuggestIn(elements: readonly ObservationElement[], hint: HintKey): boolean {
-  return elements.some(
-    (e) => matchesHint(e.name, hint) || matchesHint(e.groupText ?? '', hint),
-  );
+  // Name first. groupText only when the accessible name is blank — same rule
+  // as rankCandidates / findByRole. OR-ing groupText on named ARIA UIs made
+  // FormCraft Label-step probes look like options editors (ancestor "list" /
+  // "value" chrome) and stopped revealWizardTypeEvidence before Answer Type,
+  // so Tick Many bound date/integer/text at specificity≥8.
+  return elements.some((e) => {
+    const name = (e.name || '').trim();
+    if (name) return matchesHint(name, hint);
+    return matchesHint(e.groupText ?? '', hint);
+  });
 }
 
 /** Read the canonical type from a Node Type / Element Type picker in the panel.
@@ -266,10 +273,14 @@ export function inspectPlacedControl(
   //    reading those as "this field has an option list" misclassifies a plain
   //    tick box as a multi-select. Affordances are therefore judged relative
   //    to the placed control, never to everything that appeared.
+  // Name OR groupText for panel chrome. Prism Label / Fragment Type keep the
+  // value as accessible name while only groupText says Label / Type. FormCraft
+  // "Question Text" does not hit these hint lists.
   const isPropertyEditorControl = (el: ObservationElement) =>
     matchesHint(el.name, 'property_editor')
     || matchesHint(el.groupText ?? '', 'property_editor')
     || matchesHint(el.groupText ?? '', 'panel_field');
+
 
   const canvasControls = addedElements.filter((e) => !isPropertyEditorControl(e));
   const panelControls = addedElements.filter((e) => isPropertyEditorControl(e));
@@ -503,7 +514,10 @@ export function classifyTypeFromProbe(
   // FormCraft Orbit Set / Pick One never bind (live wizard v10: 8 fields).
   if (
     probe.declaredCanonical === canonical
-    && (canonical === 'radio' || canonical === 'single_select' || canonical === 'multi_select')
+    && (
+      canonical === 'radio' || canonical === 'single_select' || canonical === 'multi_select'
+      || canonical === 'checkbox' || canonical === 'boolean'
+    )
     && (probe.observedRole === 'none' || probe.observedRole === 'generic')
   ) {
     return {
@@ -531,6 +545,8 @@ export function classifyTypeFromProbe(
     if (
       probe.declaredCanonical === 'radio'
       || probe.declaredCanonical === 'single_select'
+      || probe.declaredCanonical === 'checkbox'
+      || probe.declaredCanonical === 'boolean'
     ) {
       return {
         matches: false,
@@ -561,10 +577,26 @@ export function classifyTypeFromProbe(
   }
 
   if (canonical === 'checkbox') {
+    if (probe.declaredCanonical === 'checkbox') {
+      return { matches: true, evidence: `checkbox: type picker declares checkbox` };
+    }
     if (probe.observedRole === 'checkbox' && !probe.hasOptionsEditor) {
       return { matches: true, evidence: `checkbox: single standalone boolean checkbox` };
     }
     return { matches: false, evidence: `checkbox: not single boolean checkbox (role=${probe.observedRole}, hasOptions=${probe.hasOptionsEditor})` };
+  }
+
+  if (canonical === 'boolean') {
+    if (probe.declaredCanonical === 'boolean') {
+      return { matches: true, evidence: `boolean: type picker declares boolean` };
+    }
+    if (probe.observedRole === 'switch' || (probe.observedRole === 'checkbox' && !probe.hasOptionsEditor)) {
+      return { matches: true, evidence: `boolean: role=${probe.observedRole}` };
+    }
+    // Bare role=button matches expectedRolesForType(boolean) but steals the
+    // binding from hamburger/Commit chrome on FormCraft. Require a real
+    // switch-like control or a type-picker declaration.
+    return { matches: false, evidence: `boolean: expected switch/checkbox or declared boolean, got ${probe.observedRole}` };
   }
 
   // Numeric types
