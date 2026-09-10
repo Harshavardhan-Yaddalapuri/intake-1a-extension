@@ -23,6 +23,12 @@ import { elem, obs, resetSeq } from './fixtures/obs.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+const visitRank = (hint, demote) => ({
+  hint,
+  demote,
+  scoreGroupText: true,
+});
+
 test('rankCandidates: nameless textboxes disambiguated by groupText Wave Name vs window days', () => {
   resetSeq();
   const pool = [
@@ -33,22 +39,13 @@ test('rankCandidates: nameless textboxes disambiguated by groupText Wave Name vs
   // Shuffle input order so DOM order cannot accidentally save the test.
   const shuffled = [pool[1], pool[2], pool[0]];
 
-  const nameTop = rankCandidates(shuffled, {
-    hint: 'name_input',
-    demote: ['window_start', 'window_end'],
-  })[0].el;
+  const nameTop = rankCandidates(shuffled, visitRank('name_input', ['window_start', 'window_end']))[0].el;
   assert.equal(nameTop.groupText, 'Wave Name', 'name_input must prefer Wave Name groupText');
 
-  const startTop = rankCandidates(shuffled, {
-    hint: 'window_start',
-    demote: ['name_input', 'window_end'],
-  })[0].el;
+  const startTop = rankCandidates(shuffled, visitRank('window_start', ['name_input', 'window_end']))[0].el;
   assert.equal(startTop.groupText, 'Window Start (day)');
 
-  const endTop = rankCandidates(shuffled, {
-    hint: 'window_end',
-    demote: ['name_input', 'window_start'],
-  })[0].el;
+  const endTop = rankCandidates(shuffled, visitRank('window_end', ['name_input', 'window_start']))[0].el;
   assert.equal(endTop.groupText, 'Window End (day)');
 
   // After the name cell holds the visit title (accname from content), groupText
@@ -59,15 +56,9 @@ test('rankCandidates: nameless textboxes disambiguated by groupText Wave Name vs
     elem('textbox', '', { groupText: 'Window Start (day)' }),
     elem('textbox', '', { groupText: 'Window End (day)' }),
   ];
-  const nameStill = rankCandidates(afterName, {
-    hint: 'name_input',
-    demote: ['window_start', 'window_end'],
-  })[0].el;
+  const nameStill = rankCandidates(afterName, visitRank('name_input', ['window_start', 'window_end']))[0].el;
   assert.equal(nameStill.groupText, 'Wave Name');
-  const startStill = rankCandidates(afterName, {
-    hint: 'window_start',
-    demote: ['name_input', 'window_end'],
-  })[0].el;
+  const startStill = rankCandidates(afterName, visitRank('window_start', ['name_input', 'window_end']))[0].el;
   assert.equal(startStill.groupText, 'Window Start (day)');
   assert.notEqual(startStill.handle, nameStill.handle);
 });
@@ -106,10 +97,7 @@ test('hostile createVisit path: Screening name + window days land in correct cel
     const o = observe(w.document);
     const pool = enumerateByRoles(o, ['textbox', 'searchbox']);
     assert.equal(pool.length, 3);
-    const nameBox = rankCandidates(pool, {
-      hint: 'name_input',
-      demote: ['window_start', 'window_end'],
-    })[0].el;
+    const nameBox = rankCandidates(pool, visitRank('name_input', ['window_start', 'window_end']))[0].el;
     assert.equal(nameBox.groupText, 'Wave Name');
     assert.equal((await setValue(act(o), nameBox.handle, 'Screening')).ok, true);
   }
@@ -118,14 +106,10 @@ test('hostile createVisit path: Screening name + window days land in correct cel
   {
     const o = observe(w.document);
     const pool = enumerateByRoles(o, ['textbox', 'searchbox']);
-    const nameH = rankCandidates(pool, {
-      hint: 'name_input',
-      demote: ['window_start', 'window_end'],
-    })[0].el.handle;
-    const startBox = rankCandidates(pool, {
-      hint: 'window_start',
-      demote: ['name_input', 'window_end'],
-    }).map((c) => c.el).find((el) => el.handle !== nameH);
+    const nameH = rankCandidates(pool, visitRank('name_input', ['window_start', 'window_end']))[0].el.handle;
+    const startBox = rankCandidates(pool, visitRank('window_start', ['name_input', 'window_end']))
+      .map((c) => c.el)
+      .find((el) => el.handle !== nameH);
     assert.ok(startBox);
     assert.equal(startBox.groupText, 'Window Start (day)');
     assert.equal((await setValue(act(o), startBox.handle, '-28')).ok, true);
@@ -135,18 +119,13 @@ test('hostile createVisit path: Screening name + window days land in correct cel
   {
     const o = observe(w.document);
     const pool = enumerateByRoles(o, ['textbox', 'searchbox']);
-    const nameH = rankCandidates(pool, {
-      hint: 'name_input',
-      demote: ['window_start', 'window_end'],
-    })[0].el.handle;
-    const startH = rankCandidates(pool, {
-      hint: 'window_start',
-      demote: ['name_input', 'window_end'],
-    }).map((c) => c.el).find((el) => el.handle !== nameH)?.handle;
-    const endBox = rankCandidates(pool, {
-      hint: 'window_end',
-      demote: ['name_input', 'window_start'],
-    }).map((c) => c.el).find((el) => el.handle !== nameH && el.handle !== startH);
+    const nameH = rankCandidates(pool, visitRank('name_input', ['window_start', 'window_end']))[0].el.handle;
+    const startH = rankCandidates(pool, visitRank('window_start', ['name_input', 'window_end']))
+      .map((c) => c.el)
+      .find((el) => el.handle !== nameH)?.handle;
+    const endBox = rankCandidates(pool, visitRank('window_end', ['name_input', 'window_start']))
+      .map((c) => c.el)
+      .find((el) => el.handle !== nameH && el.handle !== startH);
     assert.ok(endBox);
     assert.equal(endBox.groupText, 'Window End (day)');
     assert.equal((await setValue(act(o), endBox.handle, '-1')).ok, true);

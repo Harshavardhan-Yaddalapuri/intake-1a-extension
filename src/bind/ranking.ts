@@ -51,6 +51,7 @@ export type HintKey =
   | 'delete_element'
   | 'panel_field'
   | 'wizard_advance'
+  | 'wizard_back'
   | 'menu';
 
 /** Weak lexical priors. A word here may raise a candidate's rank. A word here
@@ -117,8 +118,9 @@ export const LEXICAL_HINTS: Record<HintKey, readonly string[]> = {
   // Property-panel inputs. They sit beside the canvas tile they describe, so
   // "which control IS the placed field" must not answer with one of these.
   panel_field: ['label', 'formula', 'expression', 'visibility'],
-  // Stepper 'Next' on wizard builders (FormCraft); not a commit.
+  // Stepper 'Next' / 'Back' on wizard builders (FormCraft); not a commit.
   wizard_advance: ['next'],
+  wizard_back: ['back'],
   // Overflow / hamburger that reveals Commit when it is not on the bar.
   menu: ['menu'],
 };
@@ -212,6 +214,8 @@ export interface RankOptions {
    *  candidates are pushed down the trial order rather than removed, so the
    *  probe still reaches them if the ranking guessed wrong. */
   demote?: readonly HintKey[];
+  /** Also score groupText when name is set (createVisit name/window cells). */
+  scoreGroupText?: boolean;
   /** Handles that appeared in the most recent diff. Strong structural signal. */
   diffAdded?: readonly string[];
   /** Handle prefix bounding the region of interest. */
@@ -345,15 +349,22 @@ export function rankCandidates(
   const scored = pool.map((el, inputIndex) => {
     const signals: RankSignal[] = [];
     const lower = el.name.toLowerCase();
-    // Nameless / content-named controls (hostile contenteditable cells): the
-    // adjacent label lives in groupText ("Wave Name" vs "Window Start (day)").
-    // Score that text too so name_input cannot tie-break into a day field.
-    // Proper accessible names still dominate via the same lexical weights.
+    // Nameless contenteditables (hostile Prism): the adjacent label lives only
+    // in groupText ("Wave Name" vs "Window Start (day)"). Score groupText ONLY
+    // when name is blank so named field-placement controls (Question Text,
+    // Commit, palette tiles) are unaffected by window↔name demotion logic.
     const groupLower = (el.groupText ?? '').toLowerCase();
     const lexicalSurfaces: { label: string; text: string }[] = [
       { label: 'name', text: lower },
     ];
-    if (groupLower.trim() && groupLower.trim() !== lower.trim()) {
+    // Default: groupText only when nameless (field-placement safety).
+    // createVisit passes scoreGroupText so Wave Name still wins after the
+    // cell's accessible name becomes the visit title / day integer.
+    const useGroup =
+      !!groupLower.trim()
+      && groupLower.trim() !== lower.trim()
+      && (!lower.trim() || options.scoreGroupText === true);
+    if (useGroup) {
       lexicalSurfaces.push({ label: 'groupText', text: groupLower });
     }
 

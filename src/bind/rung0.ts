@@ -1147,10 +1147,14 @@ export function rankCommitCandidates(obs: Observation): RankedCandidate[] {
   // reusable name ("Save As Template") ties with the real save control on the
   // word "save" alone, and DOM order then decides -- which on the supplied
   // mock put the decoy first and silently lost an entire form's work.
+  //
+  // Bare "Done" is excluded: FormCraft's wizard terminal Done navigates to the
+  // visit without commitWorking. commit hints list "done", so ranking it and
+  // clicking it discarded working fields (live wizard v13: 189→19).
   return rankCandidates(enumerateActionable(obs), {
     hint: 'commit',
     demote: ['template', 'discard'],
-  });
+  }).filter((r) => (r.el.name || '').trim().toLowerCase() !== 'done');
 }
 
 /**

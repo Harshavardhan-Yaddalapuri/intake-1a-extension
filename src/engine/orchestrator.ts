@@ -70,7 +70,7 @@ import {
   findCodedValueRemoveControls,
   expectedRolesForType,
 } from '../bind/rung0';
-import { ProbeRunner, findWizardAdvanceControl } from './probe-runner';
+import { ProbeRunner, findWizardAdvanceControl, findWizardBackControl } from './probe-runner';
 import { analyzeCommit, sameSurface } from '../bind/rung1';
 import {
   enumerateActionable,
@@ -1049,7 +1049,9 @@ export class Orchestrator {
 
     let { minInputs, maxInputs, unitInputs } = collectRangeInputs(observation);
     // Wizard builders hide range on a later step — advance until min/max show.
-    for (let step = 0; step < 8 && minInputs.length === 0 && maxInputs.length === 0; step += 1) {
+    // Cap at 5 (label→type→required→options→range). Stop when Next disappears
+    // (Done on the final step) so we do not leave the surface via commit decoys.
+    for (let step = 0; step < 5 && minInputs.length === 0 && maxInputs.length === 0; step += 1) {
       const advance = findWizardAdvanceControl(observation);
       if (!advance) break;
       const clicked = await this.driver.click(advance.handle);
@@ -1329,9 +1331,21 @@ export class Orchestrator {
       // findByRole matches name OR groupText, so nameless Required checkboxes
       // on Rosetta/Nexus (broken label[for]) still resolve.
       let requiredCheckboxes = findByRole(observation, 'checkbox', { contains: 'require' });
-      // FormCraft wizard: one property per step — Required is not on the label
-      // step. Advance until the checkbox appears (live wizard required ~48%).
-      for (let step = 0; step < 8 && requiredCheckboxes.length === 0; step += 1) {
+      // FormCraft wizard: one property per step. Required sits after label/type
+      // but BEFORE range. set_range may already have advanced past it — prefer
+      // Back (up to 4) so we do not Next into the next element or onto Done
+      // (Done is a commit-hint decoy that navigates away without saving).
+      // Only then Next at most twice (label→type→required), never a blind 8-step walk.
+      for (let step = 0; step < 4 && requiredCheckboxes.length === 0; step += 1) {
+        const back = findWizardBackControl(observation);
+        if (!back) break;
+        const clicked = await this.driver.click(back.handle);
+        if (!clicked.ok) break;
+        await this.sleep(180);
+        ({ observation } = await this.driver.perceiveAfterSettle(150));
+        requiredCheckboxes = findByRole(observation, 'checkbox', { contains: 'require' });
+      }
+      for (let step = 0; step < 2 && requiredCheckboxes.length === 0; step += 1) {
         const advance = findWizardAdvanceControl(observation);
         if (!advance) break;
         const clicked = await this.driver.click(advance.handle);
@@ -1989,6 +2003,7 @@ export class Orchestrator {
     const nameBox = rankCandidates(textPool, {
       hint: 'name_input',
       demote: ['window_start', 'window_end'],
+      scoreGroupText: true,
     })[0]?.el;
     say(`name input=${nameBox ? JSON.stringify(nameBox.name || nameBox.groupText || '') : 'NONE FOUND'}`);
     if (nameBox) {
@@ -2006,10 +2021,12 @@ export class Orchestrator {
     const nameNowHandle = rankCandidates(textPool, {
       hint: 'name_input',
       demote: ['window_start', 'window_end'],
+      scoreGroupText: true,
     })[0]?.el?.handle;
     const startBox = rankCandidates(textPool, {
       hint: 'window_start',
       demote: ['name_input', 'window_end'],
+      scoreGroupText: true,
     })
       .map((c) => c.el)
       .find((el) => el.handle !== nameNowHandle);
@@ -2021,16 +2038,19 @@ export class Orchestrator {
     const nameAfterStart = rankCandidates(textPool, {
       hint: 'name_input',
       demote: ['window_start', 'window_end'],
+      scoreGroupText: true,
     })[0]?.el?.handle;
     const startAfter = rankCandidates(textPool, {
       hint: 'window_start',
       demote: ['name_input', 'window_end'],
+      scoreGroupText: true,
     })
       .map((c) => c.el)
       .find((el) => el.handle !== nameAfterStart)?.handle;
     const endFresh = rankCandidates(textPool, {
       hint: 'window_end',
       demote: ['name_input', 'window_start'],
+      scoreGroupText: true,
     })
       .map((c) => c.el)
       .find((el) => el.handle !== nameAfterStart && el.handle !== startAfter);
@@ -2044,7 +2064,7 @@ export class Orchestrator {
     const { observation: saveObs } = await this.driver.perceive();
     const nameNow = rankCandidates(
       enumerateByRoles(saveObs, ['textbox', 'searchbox']),
-      { hint: 'name_input', demote: ['window_start', 'window_end'] },
+      { hint: 'name_input', demote: ['window_start', 'window_end'], scoreGroupText: true },
     )[0]?.el?.state.value;
     say(`name reads back as ${JSON.stringify(nameNow ?? null)} (wanted ${JSON.stringify(visit.name)})`);
 

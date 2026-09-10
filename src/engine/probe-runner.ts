@@ -149,6 +149,19 @@ export function findWizardAdvanceControl(obs: Observation): { name: string; hand
   return hit ? { name: hit.el.name, handle: hit.el.handle } : null;
 }
 
+/** Stepper control that returns to the previous property (FormCraft wizard). */
+export function findWizardBackControl(obs: Observation): { name: string; handle: string } | null {
+  const ranked = rankCandidates(enumerateActions(obs), { hint: 'wizard_back' });
+  // Prefer a short wizard Back over breadcrumb ascend ("<- Screening").
+  const hit = ranked.find((r) => {
+    const n = (r.el.name || '').trim();
+    if (!r.signals.some((s) => s.name === 'lexical' || s.name === 'lexical-exact')) return false;
+    if (!matchesHintWord(n, 'wizard_back')) return false;
+    // Breadcrumbs name the parent visit/form and are longer than stepper chrome.
+    return n.length <= 16;
+  });
+  return hit ? { name: hit.el.name, handle: hit.el.handle } : null;
+}
 
 /** Delete/remove control for a selected canvas tile. Rosetta: "Delete Element";
  *  swapped: "Delete Node". Never Back/Cancel. */
