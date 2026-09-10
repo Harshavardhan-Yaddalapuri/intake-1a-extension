@@ -1,0 +1,216 @@
+{
+  "platform": "env-wizard",
+  "overall_match_pct": 7.59,
+  "total_expected": 1067,
+  "total_matched": 81,
+  "criteria": {
+    "visits": {
+      "expected": 4,
+      "matched": 4,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "visit-windows": {
+      "expected": 4,
+      "matched": 4,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "forms": {
+      "expected": 28,
+      "matched": 20,
+      "match_pct": 71.43,
+      "mismatches": [
+        "visit 'Screening' form[0] expected 'Demographics', got 'Weight / (Height / 100) ^ 2'",
+        "visit 'End of Treatment (Week 12)' form[0] expected 'Visit Status', got 'Vital Signs'",
+        "visit 'End of Treatment (Week 12)' form[1] expected 'Vital Signs', got 'Physical Examination'",
+        "visit 'End of Treatment (Week 12)' form[2] expected 'Physical Examination', got '12-Lead ECG'",
+        "visit 'End of Treatment (Week 12)' form[3] expected '12-Lead ECG', got 'Adverse Events'",
+        "visit 'End of Treatment (Week 12)' form[4] expected 'Adverse Events', got 'Disease Activity Assessment'",
+        "visit 'End of Treatment (Week 12)' form[5] expected 'Disease Activity Assessment', got 'End of Treatment'",
+        "visit 'End of Treatment (Week 12)' form[6] expected 'End of Treatment', got 'MISSING'"
+      ]
+    },
+    "repeating": {
+      "expected": 28,
+      "matched": 21,
+      "match_pct": 75.0,
+      "mismatches": [
+        "visit 'Screening' form 'Demographics' repeating expected False, got None",
+        "visit 'Screening' form 'Medical History' repeating expected True, got False",
+        "visit 'Screening' form 'Prior and Concomitant Medications' repeating expected True, got False",
+        "visit 'Week 4' form 'Adverse Events' repeating expected True, got False",
+        "visit 'Week 4' form 'Concomitant Medications' repeating expected True, got False",
+        "visit 'End of Treatment (Week 12)' form 'Visit Status' repeating expected False, got None",
+        "visit 'End of Treatment (Week 12)' form 'Adverse Events' repeating expected True, got False"
+      ]
+    },
+    "fields": {
+      "expected": 28,
+      "matched": 0,
+      "match_pct": 0.0,
+      "mismatches": [
+        "visit 'Screening' form 'Demographics' field count expected 8, got 0",
+        "visit 'Screening' form 'Informed Consent' field count expected 6, got 0",
+        "visit 'Screening' form 'Eligibility Criteria' field count expected 6, got 0",
+        "visit 'Screening' form 'Medical History' field count expected 5, got 1",
+        "visit 'Screening' form 'Prior and Concomitant Medications' field count expected 7, got 0",
+        "visit 'Screening' form 'Vital Signs' field count expected 8, got 1",
+        "visit 'Screening' form 'Local Laboratory - Hematology' field count expected 7, got 1",
+        "visit 'Baseline (Day 1)' form 'Visit Status' field count expected 6, got 2",
+        "visit 'Baseline (Day 1)' form 'Vital Signs' field count expected 8, got 1",
+        "visit 'Baseline (Day 1)' form 'Physical Examination' field count expected 6, got 0",
+        "visit 'Baseline (Day 1)' form '12-Lead ECG' field count expected 8, got 0",
+        "visit 'Baseline (Day 1)' form 'Randomization' field count expected 6, got 1",
+        "visit 'Baseline (Day 1)' form 'Study Drug Administration' field count expected 7, got 0",
+        "visit 'Baseline (Day 1)' form 'Disease Activity Assessment' field count expected 7, got 2",
+        "visit 'Week 4' form 'Visit Status' field count expected 6, got 2",
+        "visit 'Week 4' form 'Vital Signs' field count expected 8, got 1",
+        "visit 'Week 4' form 'Study Drug Administration' field count expected 7, got 0",
+        "visit 'Week 4' form 'Disease Activity Assessment' field count expected 7, got 2",
+        "visit 'Week 4' form 'Adverse Events' field count expected 8, got 0",
+        "visit 'Week 4' form 'Concomitant Medications' field count expected 7, got 0"
+      ]
+    },
+    "types": {
+      "expected": 195,
+      "matched": 0,
+      "match_pct": 0.0,
+      "mismatches": [
+        "field 'Subject Initials' MISSING in visit 'Screening' form 'Demographics'",
+        "field 'Date of Birth' MISSING in visit 'Screening' form 'Demographics'",
+        "field 'Sex at Birth' MISSING in visit 'Screening' form 'Demographics'",
+        "field 'Race' MISSING in visit 'Screening' form 'Demographics'",
+        "field 'Ethnicity' MISSING in visit 'Screening' form 'Demographics'",
+        "field 'Height' MISSING in visit 'Screening' form 'Demographics'",
+        "field 'Weight' MISSING in visit 'Screening' form 'Demographics'",
+        "field 'Body Mass Index' MISSING in visit 'Screening' form 'Demographics'",
+        "field 'Informed Consent Obtained' MISSING in visit 'Screening' form 'Informed Consent'",
+        "field 'Date of Consent' MISSING in visit 'Screening' form 'Informed Consent'",
+        "field 'Time of Consent' MISSING in visit 'Screening' form 'Informed Consent'",
+        "field 'Consent Form Version' MISSING in visit 'Screening' form 'Informed Consent'",
+        "field 'Consented By' MISSING in visit 'Screening' form 'Informed Consent'",
+        "field 'Copy Provided to Subject' MISSING in visit 'Screening' form 'Informed Consent'",
+        "field 'Age 18 Years or Older at Consent' MISSING in visit 'Screening' form 'Eligibility Criteria'",
+        "field 'Confirmed Diagnosis of Plaque Psoriasis' MISSING in visit 'Screening' form 'Eligibility Criteria'",
+        "field 'Duration of Diagnosis' MISSING in visit 'Screening' form 'Eligibility Criteria'",
+        "field 'Written Informed Consent Provided' MISSING in visit 'Screening' form 'Eligibility Criteria'",
+        "field 'Any Exclusionary Condition Present' MISSING in visit 'Screening' form 'Eligibility Criteria'",
+        "field 'Exclusionary Conditions' MISSING in visit 'Screening' form 'Eligibility Criteria'"
+      ]
+    },
+    "required": {
+      "expected": 195,
+      "matched": 9,
+      "match_pct": 4.62,
+      "mismatches": [
+        "field 'Subject Initials' MISSING",
+        "field 'Date of Birth' MISSING",
+        "field 'Sex at Birth' MISSING",
+        "field 'Race' MISSING",
+        "field 'Ethnicity' MISSING",
+        "field 'Height' MISSING",
+        "field 'Weight' MISSING",
+        "field 'Body Mass Index' MISSING",
+        "field 'Informed Consent Obtained' MISSING",
+        "field 'Date of Consent' MISSING",
+        "field 'Time of Consent' MISSING",
+        "field 'Consent Form Version' MISSING",
+        "field 'Consented By' MISSING",
+        "field 'Copy Provided to Subject' MISSING",
+        "field 'Age 18 Years or Older at Consent' MISSING",
+        "field 'Confirmed Diagnosis of Plaque Psoriasis' MISSING",
+        "field 'Duration of Diagnosis' MISSING",
+        "field 'Written Informed Consent Provided' MISSING",
+        "field 'Any Exclusionary Condition Present' MISSING",
+        "field 'Exclusionary Conditions' MISSING"
+      ]
+    },
+    "coded-pairs": {
+      "expected": 195,
+      "matched": 9,
+      "match_pct": 4.62,
+      "mismatches": [
+        "field 'Subject Initials' MISSING",
+        "field 'Date of Birth' MISSING",
+        "field 'Sex at Birth' MISSING",
+        "field 'Race' MISSING",
+        "field 'Ethnicity' MISSING",
+        "field 'Height' MISSING",
+        "field 'Weight' MISSING",
+        "field 'Body Mass Index' MISSING",
+        "field 'Informed Consent Obtained' MISSING",
+        "field 'Date of Consent' MISSING",
+        "field 'Time of Consent' MISSING",
+        "field 'Consent Form Version' MISSING",
+        "field 'Consented By' MISSING",
+        "field 'Copy Provided to Subject' MISSING",
+        "field 'Age 18 Years or Older at Consent' MISSING",
+        "field 'Confirmed Diagnosis of Plaque Psoriasis' MISSING",
+        "field 'Duration of Diagnosis' MISSING",
+        "field 'Written Informed Consent Provided' MISSING",
+        "field 'Any Exclusionary Condition Present' MISSING",
+        "field 'Exclusionary Conditions' MISSING"
+      ]
+    },
+    "ranges": {
+      "expected": 195,
+      "matched": 5,
+      "match_pct": 2.56,
+      "mismatches": [
+        "field 'Subject Initials' MISSING",
+        "field 'Date of Birth' MISSING",
+        "field 'Sex at Birth' MISSING",
+        "field 'Race' MISSING",
+        "field 'Ethnicity' MISSING",
+        "field 'Height' MISSING",
+        "field 'Weight' MISSING",
+        "field 'Body Mass Index' MISSING",
+        "field 'Informed Consent Obtained' MISSING",
+        "field 'Date of Consent' MISSING",
+        "field 'Time of Consent' MISSING",
+        "field 'Consent Form Version' MISSING",
+        "field 'Consented By' MISSING",
+        "field 'Copy Provided to Subject' MISSING",
+        "field 'Age 18 Years or Older at Consent' MISSING",
+        "field 'Confirmed Diagnosis of Plaque Psoriasis' MISSING",
+        "field 'Duration of Diagnosis' MISSING",
+        "field 'Written Informed Consent Provided' MISSING",
+        "field 'Any Exclusionary Condition Present' MISSING",
+        "field 'Exclusionary Conditions' MISSING"
+      ]
+    },
+    "skip-rules": {
+      "expected": 195,
+      "matched": 9,
+      "match_pct": 4.62,
+      "mismatches": [
+        "field 'Subject Initials' MISSING",
+        "field 'Date of Birth' MISSING",
+        "field 'Sex at Birth' MISSING",
+        "field 'Race' MISSING",
+        "field 'Ethnicity' MISSING",
+        "field 'Height' MISSING",
+        "field 'Weight' MISSING",
+        "field 'Body Mass Index' MISSING",
+        "field 'Informed Consent Obtained' MISSING",
+        "field 'Date of Consent' MISSING",
+        "field 'Time of Consent' MISSING",
+        "field 'Consent Form Version' MISSING",
+        "field 'Consented By' MISSING",
+        "field 'Copy Provided to Subject' MISSING",
+        "field 'Age 18 Years or Older at Consent' MISSING",
+        "field 'Confirmed Diagnosis of Plaque Psoriasis' MISSING",
+        "field 'Duration of Diagnosis' MISSING",
+        "field 'Written Informed Consent Provided' MISSING",
+        "field 'Any Exclusionary Condition Present' MISSING",
+        "field 'Exclusionary Conditions' MISSING"
+      ]
+    }
+  },
+  "runtime": {
+    "escalations": "N/A",
+    "llm_calls": "N/A",
+    "human_decisions": "N/A"
+  }
+}
