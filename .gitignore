@@ -9,3 +9,6 @@ dist/
 .env.*
 .openrouter_key
 !.env.example
+docs/intake-ext-sync.tgz
+intake-1a-v*.tgz
+synced-tip*.txt

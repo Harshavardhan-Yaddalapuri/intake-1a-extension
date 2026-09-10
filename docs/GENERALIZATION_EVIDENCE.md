@@ -1,5 +1,12 @@
 # Intake-1a Generalization Evidence
 
+> **Submit status (2026-09-10):** Use **v14** live board on behavior tip `d220d9d`.
+> Rosetta 99.44% · swapped 93.91% · wizard 77.51% · hostile-a11y 4.4% (fields 0).
+> See `generalization-runs/SUBMIT_BASELINE.md` and `LIVE_V14_RESULTS_d220d9d.md`.
+> Later v15/v16 Prism experiments were reverted and are **not** the submit package.
+
+---
+
 **Date:** 2026-09-09 (America/Detroit)  
 **Extension sync:** Mac worktree `fix/skip-logic-and-formula-writes` @ `c0bda5e`  
 **IR:** `takehome/data/abc-101-study.ir.json` (4 visits / 28 forms / 195 fields / 13 skip rules)  

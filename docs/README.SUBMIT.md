@@ -119,33 +119,40 @@ Those APIs are for human / harness scoring only.
 
 ### Hostile / unseen mocks (live E2E)
 
-| Environment | Best live overall | Notes |
+Best **v14** live overalls on tip `d220d9d` (see `docs/generalization-runs/LIVE_V14_RESULTS_d220d9d.md`):
+
+| Environment | Live overall | Notes |
 |---|---:|---|
-| env-swapped-controls | **19.4%** (v7) | v8 regressed to 0.37% (flaky visit-open / SW / runner) |
-| env-rosetta | **3.37%** | Demographics often polluted with leftover palette tile names |
-| env-wizard | **0.37%** | Little/no meaningful build |
-| env-hostile-a11y | **0%** | Accessibility observe effectively empty |
+| env-rosetta | **99.44%** | Vocabulary-hostile; required/coded pairs strong |
+| env-swapped-controls | **93.91%** | Inverted type labels; near-complete build |
+| env-wizard | **77.51%** | Wizard/hamburger UI; recovered after Done-decoy commit bug |
+| env-hostile-a11y | **4.4%** | Zero-ARIA: visits/forms create, **field placement still 0** |
 
-Harness perfect-seed ceiling is **100%** on all four (scoring input shape is
-fine). Live agent generalization is **not** at a ~70% never-seen bar.
+Harness perfect-seed ceiling is **100%** on all four. Three of four proxies
+clear a ~70% unseen bar; zero-ARIA field write remains the honest gap.
 
-Evidence: `docs/GENERALIZATION_EVIDENCE.md` and
-`docs/generalization-runs/*-score.json`.
+Evidence: `docs/generalization-runs/LIVE_V14_RESULTS_d220d9d.md` and
+`docs/generalization-runs/*-after-v14-score.json`.
+
+Submit package pointers: `docs/generalization-runs/SUBMIT_BASELINE.md`,
+`docs/SUBMIT_CHECKLIST.md`.
 
 ## Special considerations scorecard
 
-| Consideration | Mock A | Hostile / unseen |
+Proven against Mock A + v14 hostile live runs (`d220d9d`). Zero-ARIA remains the weak row.
+
+| Consideration | Mock A | Hostile / unseen (v14) |
 |---|---|---|
-| Semantic type mapping (probe ladder) | Pass (195/195) | Weak / trap-prone |
-| Recall + naming | Pass | Fail (rosetta palette leftovers; visit-open gates) |
-| Coded value pairs | Pass 195/195 | Not established |
-| Skip logic + order | Pass 13/13 | Not established |
-| Form reuse across visits | Pass 28/28 | Not established |
-| Ranges | Mostly (190/195) | Not established |
-| Explicit save / commit | Pass | Name traps (e.g. rosetta `Freeze` vs decoys) |
-| Decoy buttons | Partially handled | Still a failure family |
-| Read-back verify | Yes | Yes (when UI reachable) |
-| Idempotency (check-before-create) | Designed in engine/verify; **second Mock A run not re-proven this week** | Depends on enumerate |
+| Semantic type mapping (probe ladder) | Pass (195/195) | Strong on rosetta/swapped/wizard; weak on zero-ARIA |
+| Recall + naming | Pass | Pass on rosetta/swapped/wizard; a11y visits name OK, fields not placed |
+| Coded value pairs | Pass 195/195 | Strong on rosetta/swapped; partial on wizard |
+| Skip logic + order | Pass 13/13 | Present where forms/fields complete |
+| Form reuse across visits | Pass 28/28 | Pass on high-scoring proxies |
+| Ranges | Mostly (190/195) | Strong where fields land |
+| Explicit save / commit | Pass | Pass; wizard `Done` treated as decoy not commit |
+| Decoy buttons | Partially handled | Improved (commit ranking ignores bare Done) |
+| Read-back verify | Yes | Yes when UI reachable |
+| Idempotency (check-before-create) | Designed in engine/verify; re-record second Mock A if graders want proof | Depends on enumerate |
 | Human gate / traceability | Yes | Yes |
 | No `__readState` in agent build path | Yes | Yes |
 
@@ -172,15 +179,16 @@ zero form-domain knowledge, zero LLM calls.
 
 ## Known limitations
 
-- Cannot claim ~70% on never-seen mocks with current live evidence.
-- Hostile runs are flaky (service-worker lifetime, visit-open gates, probe
-  cleanup leaving palette names on canvas).
-- `env-hostile-a11y` is effectively unobservable via the a11y tree.
+- Three of four hostile proxies score ≥70% live (v14); zero-ARIA
+  (`env-hostile-a11y`) still fails field placement after visit/form create.
+- Lexical vocabulary hints (e.g. wave/survey, wizard Next) are weak priors —
+  structural perceive/bind/verify is the real generalization path.
 - Idempotency is implemented (skip already-verified / check-first create) but
-  needs a fresh second Mock A recording for graders.
-- Five Mock A range `min=0` edge cases remain.
+  a fresh second Mock A recording is still recommended for graders.
+- Five Mock A range `min=0` edge cases remain on the friendly mock.
 
 ## AI tools used
 
-Local Chrome live runs + Cursor / Grok Bot coaching on this machine.
+Local Chrome live runs + Cursor / Grok Bot coaching. Optional Rung 2 via
+OpenRouter (side-panel key → `chrome.storage.local`; never bundled).
 Cloud coding agents were unavailable for this repo on the current plan.
