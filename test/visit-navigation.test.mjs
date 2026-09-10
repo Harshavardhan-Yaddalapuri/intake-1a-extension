@@ -183,3 +183,11 @@ test('rosetta: atVisitList rejects Phases as a create-control witness', () => {
     'visit detail is not the visit list when the create control is absent',
   );
 });
+
+test('rosetta: atVisitList rejects form-create witness on visit detail', () => {
+  assert.equal(
+    atVisitList(observe(rosettaVisitScreen('Screening')), VISITS, '+ New Record Sheet'),
+    false,
+    '+ New Record Sheet must not witness the visit list',
+  );
+});

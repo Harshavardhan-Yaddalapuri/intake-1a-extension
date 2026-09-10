@@ -23,6 +23,8 @@ import {
   findPlacedProbeSelectTarget,
   isSafePaletteProbeCandidate,
   probeTileResiduePresent,
+  placedProbeCanvasNames,
+  paletteNamedResiduePresent,
 } from '../dist/probe-runner.mjs';
 import {
   atVisitList,
@@ -309,4 +311,129 @@ test('swapped: probe cleanup must not Delete already-built IR fields', async () 
     false,
     'after cleanup, only pre-place IR fields remain — not probe residue',
   );
+});
+
+
+test('rosetta: palette-named residue stays visible after deselect (name ledger)', () => {
+  const w = loadEnv('env-rosetta');
+  openDemographics(w);
+  const before = observe(w.document);
+  w.document.querySelector('#brick-calculated').click();
+  const after = observe(w.document);
+  const names = placedProbeCanvasNames(before, after);
+  assert.ok(names.some((n) => /derived value/i.test(n)), `placed names=${JSON.stringify(names)}`);
+
+  w.eval('selectElement(null)');
+  const deselected = observe(w.document);
+  assert.equal(
+    paletteNamedResiduePresent(before, deselected, names),
+    true,
+    'deselect must not clear palette-named canvas residue',
+  );
+  assert.equal(probeTileResiduePresent(before, deselected, names), true);
+});
+
+test('rosetta: atVisitList rejects form-create witness on visit detail', () => {
+  const w = loadEnv('env-rosetta');
+  w.eval(`(function(){
+    state.study={name:'ABC-101',visits:[{id:'v1',name:'Screening',windowStart:'-28',windowEnd:'-1',forms:[
+      {id:'f1',name:'Demographics',repeating:false,status:'draft',version:1,pages:[{id:'pg1',name:'Page 1',elements:[]}]}
+    ]}]};
+    try { commit(Object.assign({}, state)); } catch (e) {}
+    navigate({ kind: 'visit', visitId: 'v1' });
+  })()`);
+  const obs = observe(w.document);
+  assert.equal(atVisitDetail(obs, 'Screening'), true);
+  assert.equal(
+    atVisitList(obs, VISITS, '+ New Record Sheet'),
+    false,
+    'form-create on detail must not count as visit list',
+  );
+  assert.equal(atVisitList(obs, VISITS, '+ New Phase'), false);
+});
+
+test('rosetta: visit detail still open when Screening name stripped from a11y', () => {
+  const w = loadEnv('env-rosetta');
+  w.eval(`(function(){
+    state.study={name:'ABC-101',visits:[{id:'v1',name:'Screening',windowStart:'-28',windowEnd:'-1',forms:[
+      {id:'f1',name:'Demographics',repeating:false,status:'draft',version:1,pages:[{id:'pg1',name:'Page 1',elements:[]}]}
+    ]}]};
+    try { commit(Object.assign({}, state)); } catch (e) {}
+    navigate({ kind: 'visit', visitId: 'v1' });
+  })()`);
+  const obs = observe(w.document);
+  const stripped = {
+    ...obs,
+    elements: obs.elements.map((e) => ({
+      ...e,
+      name: (e.name || '').replace(/Screening/gi, '***'),
+      groupText: (e.groupText || '').replace(/Screening/gi, '***'),
+    })),
+  };
+  assert.equal(
+    atVisitDetail(stripped, 'Screening', VISITS),
+    true,
+    'form-create alone must confirm visit detail under hostile naming',
+  );
+  assert.ok(
+    enumerateActionable(stripped).some((e) => e.name === '+ New Record Sheet'),
+  );
+
+  // If another visit is clearly indicated, do not claim Screening.
+  const otherVisit = {
+    ...stripped,
+    elements: stripped.elements.map((e) => ({
+      ...e,
+      name: (e.name || '').includes('***') ? e.name : e.name,
+      groupText: `${e.groupText || ''} Baseline (Day 1)`,
+    })),
+  };
+  assert.equal(
+    atVisitDetail(otherVisit, 'Screening', VISITS),
+    false,
+    'must not accept Screening while another known visit is indicated',
+  );
+});
+
+test('rosetta: poisoned form-create does not block detail short-circuit after Demographics', () => {
+  // Mirrors navigateToVisit after leaving the designer: already on detail,
+  // visit.create rebound to "+ New Record Sheet". Old atVisitList was true,
+  // climb skipped, Screening row missing → "could not open this visit".
+  const w = loadEnv('env-rosetta');
+  openDemographics(w);
+  const ascend = rankAscendCandidates(observe(w.document), VISITS)[0];
+  assert.equal(ascend.name, '<- Screening');
+  const btn = [...w.document.querySelectorAll('button')]
+    .find((b) => (b.textContent || '').trim() === ascend.name);
+  btn.click();
+
+  const detail = observe(w.document);
+  assert.equal(atVisitDetail(detail, 'Screening'), true);
+  assert.equal(atVisitList(detail, VISITS, '+ New Record Sheet'), false);
+  // Short-circuit condition used by navigateToVisit:
+  assert.equal(
+    atVisitDetail(detail, 'Screening')
+      || (atVisitList(detail, VISITS, '+ New Record Sheet') && !atVisitDetail(detail)),
+    true,
+  );
+  assert.equal(
+    enumerateActionable(detail).some((e) => e.name === 'Screening'),
+    false,
+    'detail has no Screening row — list open path would false-gate',
+  );
+});
+
+test('swapped: atVisitList rejects + New Instrument on visit detail', () => {
+  const w = loadEnv('env-swapped-controls');
+  w.eval(`(function(){
+    state.study={name:'ABC-101',visits:[{id:'v1',name:'Screening',windowStart:'-28',windowEnd:'-1',forms:[
+      {id:'f1',name:'Demographics',repeating:false,status:'draft',version:1,pages:[{id:'pg1',name:'Page 1',elements:[]}]}
+    ]}]};
+    try { commit(Object.assign({}, state)); } catch (e) {}
+    navigate({ kind: 'visit', visitId: 'v1' });
+  })()`);
+  const obs = observe(w.document);
+  assert.equal(atVisitDetail(obs, 'Screening'), true);
+  assert.equal(atVisitList(obs, VISITS, '+ New Instrument'), false);
+  assert.equal(atVisitList(obs, VISITS, '+ New Cycle'), false);
 });

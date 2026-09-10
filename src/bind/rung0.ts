@@ -468,6 +468,28 @@ function looksLikeCreateControl(name: string): boolean {
   return /(?:^|\s)(add|new|create)(?:\s|$)/.test(n);
 }
 
+/**
+ * Visit-list create witness — must look like creating a VISIT/phase/cycle,
+ * not a form/page/element. "+ New Record Sheet" / "+ Page" / "+ New Instrument"
+ * live on visit detail / designer; treating them as visit.create made
+ * atVisitList true on those screens, so navigateToVisit skipped the climb,
+ * found no Screening row, and false-gated "could not open this visit"
+ * (Hostile E2E rosetta after Demographics).
+ */
+function looksLikeVisitCreateControl(name: string): boolean {
+  if (!looksLikeCreateControl(name)) return false;
+  const n = normaliseText(name);
+  // Form / document create on the visit detail.
+  if (/(?:^|\s)(form|sheet|record|instrument|document|crf|source)(?:\s|$)/.test(n)) {
+    return false;
+  }
+  // Designer page chrome.
+  if (/(?:^|\s)(page|element|field|node|brick|tile)(?:\s|$)/.test(n)) {
+    return false;
+  }
+  return true;
+}
+
 export function atVisitList(
   obs: Observation,
   visitNames: readonly string[],
@@ -481,7 +503,7 @@ export function atVisitList(
   }
 
   const create = createControlName ? normaliseText(createControlName) : '';
-  if (!create || !looksLikeCreateControl(createControlName!)) return false;
+  if (!create || !looksLikeVisitCreateControl(createControlName!)) return false;
   return actionable.some((e) => normaliseText(e.name) === create);
 }
 
@@ -497,6 +519,7 @@ export function atVisitList(
 export function atVisitDetail(
   obs: Observation,
   visitName?: string,
+  knownVisitNames: readonly string[] = [],
 ): boolean {
   const actionable = enumerateActionable(obs);
   const hasFormCreate = actionable.some((e) => {
@@ -509,12 +532,26 @@ export function atVisitDetail(
   });
   if (!hasFormCreate) return false;
   if (!visitName) return true;
-  // Soft corroboration: visit name appears somewhere on the surface (heading /
-  // breadcrumb text is fine — enumerateActionable excludes headings, so scan
-  // all elements).
+
+  // Prefer seeing the visit name (heading / breadcrumb / groupText). Hostile
+  // a11y trees sometimes omit it while still exposing form-create. Requiring
+  // the name then made navigateToVisit treat an already-open detail as "not
+  // open", climb via "<- Back", and false-gate re-open.
   const target = normaliseText(visitName);
   if (!target) return true;
-  return obs.elements.some((e) => normaliseText(`${e.name} ${e.groupText ?? ''}`).includes(target));
+  const blob = (e: { name: string; groupText?: string }) =>
+    normaliseText(`${e.name} ${e.groupText ?? ''}`);
+  if (obs.elements.some((e) => blob(e).includes(target))) return true;
+
+  // Name absent: still accept UNLESS another known visit is clearly indicated
+  // (avoids claiming Screening while standing on Baseline's form list).
+  const others = knownVisitNames
+    .map(normaliseText)
+    .filter((n) => n && n !== target);
+  if (others.some((o) => obs.elements.some((e) => blob(e).includes(o)))) {
+    return false;
+  }
+  return true;
 }
 
 /**

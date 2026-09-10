@@ -1670,7 +1670,7 @@ export class Orchestrator {
     // Screening escalated as "could not open" after Demographics was built.
     {
       const { observation: here } = await this.driver.perceive();
-      if (atVisitDetail(here, visit.name)) {
+      if (atVisitDetail(here, visit.name, visitNames)) {
         this.currentVisitId = visitId;
         this.currentFormId = null;
         return true;
@@ -1683,16 +1683,18 @@ export class Orchestrator {
     // every depth, so the run silently stayed inside one visit and built every
     // form into it.
     const hops: string[] = [];
-    let reached = atVisitList(
-      (await this.driver.perceive()).observation, visitNames, createControl,
-    );
+    // Visit detail exposes form-create; that must never count as "reached the
+    // visit list" even if visit.create was rebound to "+ New Record Sheet".
+    const onVisitList = (o: Observation) =>
+      atVisitList(o, visitNames, createControl) && !atVisitDetail(o);
+    let reached = onVisitList((await this.driver.perceive()).observation);
     for (let hop = 0; hop < 4 && !reached; hop += 1) {
       const { observation } = await this.driver.perceive();
       // Still inside this visit's form list after a hop (e.g. designer →
       // detail via "<- Screening"). That IS the destination — keep climbing
       // and we leave it for the schedule, then fail to re-open (Hostile E2E
       // v6 Screening "could not open this visit" after Demographics).
-      if (atVisitDetail(observation, visit.name)) {
+      if (atVisitDetail(observation, visit.name, visitNames)) {
         this.currentVisitId = visitId;
         this.currentFormId = null;
         return true;
@@ -1703,12 +1705,12 @@ export class Orchestrator {
       await this.sleep(450);
       const { observation: after } = await this.driver.perceiveAfterSettle(200);
       hops.push(best.name);
-      if (atVisitDetail(after, visit.name)) {
+      if (atVisitDetail(after, visit.name, visitNames)) {
         this.currentVisitId = visitId;
         this.currentFormId = null;
         return true;
       }
-      reached = atVisitList(after, visitNames, createControl);
+      reached = onVisitList(after);
     }
 
     if (!reached) {
@@ -1762,8 +1764,11 @@ export class Orchestrator {
       // Prefer positive structural proof (form-create control on the visit
       // detail) over negating atVisitList — inert "Phases" chrome made the
       // negation unreliable and blocked Screening after the create-control fix.
-      opened = atVisitDetail(after, visit.name)
-        || !atVisitList(after, visitNames, createControl);
+      // Prefer positive form-create proof. Negating atVisitList alone is not
+      // enough when a poisoned createControl made the list witness fire on
+      // detail — require that we left the list OR landed on detail.
+      opened = atVisitDetail(after, visit.name, visitNames)
+        || (Boolean(link) && !onVisitList(after));
     }
 
     if (!opened) {

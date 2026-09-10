@@ -171,6 +171,10 @@ export function computeRole(el: Element): string {
     return (el as HTMLSelectElement).multiple ? 'listbox' : 'combobox';
   }
   if (tag === 'textarea') return 'textbox';
+  // Contenteditable hosts are textbox-like even without an explicit role —
+  // hostile designers routinely replace <input>/<textarea> with editable divs
+  // and leave the a11y tree empty.
+  if (isContentEditableHost(el)) return 'textbox';
   if (tag === 'a' && !el.hasAttribute('href')) return 'generic';
   if (tag === 'img' && (el as HTMLImageElement).alt === '') return 'presentation';
   return NATIVE_ROLE_BY_TAG[tag] ?? 'generic';
@@ -304,6 +308,9 @@ function currentValue(el: Element): string | undefined {
   }
   if (tag === 'textarea') return (el as HTMLTextAreaElement).value;
   if (tag === 'select') return (el as HTMLSelectElement).value;
+  if (isContentEditableHost(el)) {
+    return (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+  }
   return undefined;
 }
 
@@ -479,41 +486,75 @@ function nativeInteractive(el: Element): boolean {
 }
 
 /**
- * True when this element is where a pointer cursor STARTS.
+ * True when the element itself declares (or computes to) cursor:pointer
+ * without merely inheriting it from a parent.
  *
- * `cursor` is an inherited property, so a card styled `cursor: pointer` hands
- * that value to every div and span inside it. Reading the computed value alone
- * therefore says "clickable" about text, not just about the thing that is
- * actually clickable. On this designer that turned each field's card into four
- * controls -- head, label, meta, preview -- and the label span is named exactly
- * the field's own name:
- *
- *   span.element-label "Ethnicity"  +  select[aria-label=Ethnicity]
- *     -> "more than one element resolves to the label \"Ethnicity\""
- *   span.element-label "Race"       +  checkboxes named "Race: White", ...
- *     -> "element \"Race\" has role \"generic\""
- *
- * An element that merely inherited the value declared nothing. Only the one
- * that changed it did.
+ * Prefer getComputedStyle when it works (live pages + jsdom with stylesheets).
+ * When computed style is unavailable or empty — common in bare jsdom / detached
+ * nodes — fall back to the inline style attribute / el.style.cursor so hostile
+ * fixtures that stamp `style="cursor:pointer"` on role-less divs are still seen.
  */
 function hasCursorPointer(el: Element): boolean {
   try {
     const view = el.ownerDocument.defaultView;
-    if (!view) return false;
-    if (view.getComputedStyle(el).cursor !== 'pointer') return false;
-    const parent = el.parentElement;
-    return !parent || view.getComputedStyle(parent).cursor !== 'pointer';
+    if (view) {
+      const own = view.getComputedStyle(el).cursor;
+      if (own === 'pointer') {
+        const parent = el.parentElement;
+        return !parent || view.getComputedStyle(parent).cursor !== 'pointer';
+      }
+      // A real computed value that is not pointer means the author did not
+      // mark this as clickable via CSS. Empty string is treated as "unknown"
+      // (jsdom sometimes returns it) and falls through to the inline check.
+      if (own) return false;
+    }
   } catch {
     // jsdom or detached node: no computed style available.
   }
-  return false;
+  return declaresInlinePointerCursor(el);
+}
+
+/** Inline-only pointer declaration used when computed style is unavailable. */
+function declaresInlinePointerCursor(el: Element): boolean {
+  const htmlEl = el as HTMLElement;
+  const ownInline =
+    (typeof htmlEl.style?.cursor === 'string' && htmlEl.style.cursor.trim().toLowerCase() === 'pointer') ||
+    /(?:^|;)\s*cursor\s*:\s*pointer\b/i.test(el.getAttribute('style') ?? '');
+  if (!ownInline) return false;
+  const parent = el.parentElement as HTMLElement | null;
+  if (!parent) return true;
+  const parentInline =
+    (typeof parent.style?.cursor === 'string' && parent.style.cursor.trim().toLowerCase() === 'pointer') ||
+    /(?:^|;)\s*cursor\s*:\s*pointer\b/i.test(parent.getAttribute('style') ?? '');
+  return !parentInline;
+}
+
+/**
+ * Contenteditable host (attribute or live isContentEditable). jsdom often
+ * lacks the isContentEditable IDL, so the attribute is the reliable signal.
+ */
+function isContentEditableHost(el: Element): boolean {
+  const htmlEl = el as HTMLElement;
+  if (typeof htmlEl.isContentEditable === 'boolean') {
+    return htmlEl.isContentEditable;
+  }
+  const attr = el.getAttribute('contenteditable');
+  if (attr === null) return false;
+  const v = attr.trim().toLowerCase();
+  return v === '' || v === 'true';
+}
+
+/** Legacy HTML onclick=... attribute — click listeners are invisible to us. */
+function hasOnclickAttribute(el: Element): boolean {
+  return el.hasAttribute('onclick');
 }
 
 /** Selector for the things a container may hold that make it a container.
  *  Deliberately excludes the cursor heuristic: nesting one merely-clickable
  *  box in another says nothing about which is the control. */
 const CONTROL_INSIDE =
-  'input,select,textarea,button,a[href],[tabindex],[role],summary,details,option';
+  'input,select,textarea,button,a[href],[tabindex],[role],summary,details,option,' +
+  '[contenteditable]:not([contenteditable="false"])';
 
 /** True when this element holds controls of its own.
  *
@@ -531,6 +572,9 @@ function containsControls(el: Element): boolean {
 
 export function isInteractive(el: Element): boolean {
   if (nativeInteractive(el)) return true;
+  // Contenteditable before role bookkeeping: computeRole maps these to
+  // textbox, but keep an explicit gate so a presentation role cannot hide them.
+  if (isContentEditableHost(el)) return true;
   const role = computeRole(el);
   if (GRID_ONLY_ROLES.has(role)) {
     // Only interactive inside a grid/treegrid, or when explicitly focusable.
@@ -546,6 +590,9 @@ export function isInteractive(el: Element): boolean {
   // element that declares itself a control -- a real control, an ARIA role, a
   // tab stop -- is one however it is styled and was accepted above.
   if (hasCursorPointer(el) && !containsControls(el)) return true;
+  // onclick=... is visible in the DOM when addEventListener is not. Same
+  // container rule as the cursor heuristic.
+  if (hasOnclickAttribute(el) && !containsControls(el)) return true;
   return false;
 }
 

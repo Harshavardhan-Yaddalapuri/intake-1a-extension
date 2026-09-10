@@ -5,3 +5,7 @@ dist/
 /content.js
 /background.js
 /sidepanel.js
+.env
+.env.*
+.openrouter_key
+!.env.example

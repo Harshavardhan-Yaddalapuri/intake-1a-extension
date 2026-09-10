@@ -235,6 +235,56 @@ export function findPlacedProbeSelectTarget(
 }
 
 /**
+ * Accessible names of canvas controls that appeared with the place.
+ * Used to verify delete removed the probe even when selection/delete chrome
+ * is gone and observation size alone looks clean.
+ */
+export function placedProbeCanvasNames(
+  beforePlace: Observation,
+  afterPlace: Observation,
+): string[] {
+  const beforeHandles = new Set(beforePlace.elements.map((e) => e.handle));
+  const names: string[] = [];
+  for (const e of afterPlace.elements) {
+    if (beforeHandles.has(e.handle)) continue;
+    const n = (e.name || '').trim();
+    if (!n) continue;
+    const lower = n.toLowerCase();
+    if (matchesHintWord(lower, 'delete_element')) continue;
+    if (lower.startsWith('<-') || lower.startsWith('+') || lower.startsWith('←')) continue;
+    if (matchesHintWord(lower, 'ascend') || matchesHintWord(lower, 'chrome')) continue;
+    if (lower.includes('filter')) continue;
+    if (matchesHintExact(lower, 'panel_field')) continue;
+    names.push(n);
+  }
+  return [...new Set(names)];
+}
+
+/**
+ * True when a just-placed probe tile's accessible name still appears on a
+ * handle that was not present before the place. Catches the live failure
+ * where Delete appeared to succeed (panel closed) but the palette-named
+ * canvas field remained for Freeze to persist.
+ */
+export function paletteNamedResiduePresent(
+  beforePlace: Observation,
+  current: Observation,
+  placedNames: readonly string[],
+): boolean {
+  if (placedNames.length === 0) return false;
+  const want = new Set(
+    placedNames.map((n) => n.trim().toLowerCase()).filter(Boolean),
+  );
+  if (want.size === 0) return false;
+  const beforeHandles = new Set(beforePlace.elements.map((e) => e.handle));
+  return current.elements.some((e) => {
+    if (beforeHandles.has(e.handle)) return false;
+    const n = (e.name || '').trim().toLowerCase();
+    return want.has(n);
+  });
+}
+
+/**
  * True when a just-placed probe still appears to occupy the canvas.
  *
  * Observation size alone lies for empty choice tiles: deselecting drops the
@@ -242,13 +292,18 @@ export function findPlacedProbeSelectTarget(
  * while the tile remains in builder state with no perceivable canvas preview.
  * Live Chrome then Freezes that residue into Demographics (Hostile E2E v7
  * rosetta: 13 palette chrome names ahead of IR labels).
+ *
+ * Optional `placedNames` tightens the check: leftover palette-named fields
+ * count as residue even when Delete chrome is gone and size matched.
  */
 export function probeTileResiduePresent(
   beforePlace: Observation,
   current: Observation,
+  placedNames: readonly string[] = [],
 ): boolean {
   if (findProbeDeleteAction(current)) return true;
   if (findPlacedProbeSelectTarget(beforePlace, current)) return true;
+  if (paletteNamedResiduePresent(beforePlace, current, placedNames)) return true;
   return current.elements.length > beforePlace.elements.length;
 }
 
@@ -309,6 +364,9 @@ export class ProbeRunner {
         .filter((n) => /^(lock|freeze|preview|deploy|stash|bank it)$/.test(n)),
     );
 
+    const openingObservation = currentObs;
+    const placedNameLedger: string[] = [];
+
     for (const btn of candidateButtons) {
       try {
         // 1. Snapshot before click — re-resolve the tile by name. Prior
@@ -355,7 +413,9 @@ export class ProbeRunner {
           // Nothing useful appeared -- but a tile may still have landed (empty
           // choice / nameless canvas). Clean it up before skipping.
           if (diffObservations(before.observation, observed).added.length > 0) {
-            await this.removePlacedProbe(before.observation, observed);
+            const names = placedProbeCanvasNames(before.observation, observed);
+            placedNameLedger.push(...names);
+            await this.removePlacedProbe(before.observation, observed, names);
           }
           continue;
         }
@@ -397,11 +457,17 @@ export class ProbeRunner {
         // the canvas commits chrome names ("Derived Value", "Dial Group") as
         // fields beside the real IR labels (Hostile E2E v5 rosetta 21-field
         // Demographics), and reused panel handles break the next deepen.
-        await this.removePlacedProbe(before.observation, observed);
+        const names = placedProbeCanvasNames(before.observation, observed);
+        placedNameLedger.push(...names);
+        await this.removePlacedProbe(before.observation, observed, names);
       } catch (err) {
         console.warn(`[ProbeRunner] Failed probing button "${btn.name}":`, err);
       }
     }
+
+    // Final sweep: any palette-named canvas field that survived a flaky delete
+    // still counts as IR pollution once Freeze copies working → study.
+    await this.sweepPaletteProbeResidue(openingObservation, placedNameLedger);
 
     return { bindings, discovered };
   }
@@ -421,6 +487,7 @@ export class ProbeRunner {
   private async removePlacedProbe(
     beforePlace: Observation,
     afterPlace: Observation,
+    placedNames: readonly string[] = placedProbeCanvasNames(beforePlace, afterPlace),
   ): Promise<void> {
     const baselineSize = beforePlace.elements.length;
     // If the place left a selected tile, we must land a real Delete click.
@@ -433,13 +500,14 @@ export class ProbeRunner {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       // Fresh snapshot so delete handles match ACT_EXECUTE's re-perceive.
       current = (await this.driver.perceive()).observation;
-      const residue = probeTileResiduePresent(beforePlace, current);
+      const residue = probeTileResiduePresent(beforePlace, current, placedNames);
       if (!residue) {
         if (!placedWithSelection || deleteClicked) return;
         // Size matched without a delete click — keep trying to surface Delete.
       } else if (
         current.elements.length <= baselineSize
         && !placedWithSelection
+        && !paletteNamedResiduePresent(beforePlace, current, placedNames)
       ) {
         return;
       }
@@ -487,7 +555,58 @@ export class ProbeRunner {
       deleteClicked = true;
       await this.sleep(180);
       current = (await this.driver.perceiveAfterSettle(150)).observation;
-      if (!probeTileResiduePresent(beforePlace, current)) return;
+      if (!probeTileResiduePresent(beforePlace, current, placedNames)) return;
+    }
+  }
+
+  /**
+   * After the palette sweep, delete any canvas controls still named like a
+   * tile we placed. Per-probe cleanup can lose a race (toast path-shift,
+   * empty-choice false clean) and leave "Derived Value" … "Binary Flip" for
+   * Freeze to persist — Hostile E2E v7 rosetta Demographics pollution.
+   */
+  private async sweepPaletteProbeResidue(
+    beforeAll: Observation,
+    placedNames: readonly string[],
+  ): Promise<void> {
+    const unique = [...new Set(placedNames.map((n) => n.trim()).filter(Boolean))];
+    if (unique.length === 0) return;
+
+    for (let pass = 0; pass < unique.length + 3; pass += 1) {
+      const current = (await this.driver.perceive()).observation;
+      if (!paletteNamedResiduePresent(beforeAll, current, unique)) return;
+
+      // Prefer the shared select-target helper (fresh handles only).
+      let selectable = findPlacedProbeSelectTarget(beforeAll, current);
+      if (!selectable) {
+        const beforeHandles = new Set(beforeAll.elements.map((e) => e.handle));
+        const want = new Set(unique.map((n) => n.toLowerCase()));
+        const hit = current.elements.find((e) => {
+          if (beforeHandles.has(e.handle)) return false;
+          const n = (e.name || '').trim().toLowerCase();
+          return want.has(n);
+        });
+        if (hit) selectable = { name: hit.name, handle: hit.handle };
+      }
+      if (!selectable) return;
+
+      await this.driver.click(selectable.handle);
+      await this.sleep(120);
+      let afterSel = (await this.driver.perceive()).observation;
+      let del = findProbeDeleteAction(afterSel);
+      if (!del) {
+        // One more re-select by name in case the first click was a preview
+        // control that did not promote selection.
+        const again = findPlacedProbeSelectTarget(beforeAll, afterSel) ?? selectable;
+        await this.driver.click(again.handle);
+        await this.sleep(120);
+        afterSel = (await this.driver.perceive()).observation;
+        del = findProbeDeleteAction(afterSel);
+      }
+      if (!del) continue;
+      const clicked = await this.driver.click(del.handle);
+      if (!clicked.ok) continue;
+      await this.sleep(180);
     }
   }
 
