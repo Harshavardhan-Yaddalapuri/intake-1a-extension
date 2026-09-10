@@ -1,0 +1,205 @@
+{
+  "platform": "env-swapped-controls",
+  "overall_match_pct": 70.85,
+  "total_expected": 1067,
+  "total_matched": 756,
+  "criteria": {
+    "visits": {
+      "expected": 4,
+      "matched": 4,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "visit-windows": {
+      "expected": 4,
+      "matched": 4,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "forms": {
+      "expected": 28,
+      "matched": 28,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "repeating": {
+      "expected": 28,
+      "matched": 23,
+      "match_pct": 82.14,
+      "mismatches": [
+        "visit 'Screening' form 'Medical History' repeating expected True, got False",
+        "visit 'Screening' form 'Prior and Concomitant Medications' repeating expected True, got False",
+        "visit 'Week 4' form 'Adverse Events' repeating expected True, got False",
+        "visit 'Week 4' form 'Concomitant Medications' repeating expected True, got False",
+        "visit 'End of Treatment (Week 12)' form 'Adverse Events' repeating expected True, got False"
+      ]
+    },
+    "fields": {
+      "expected": 28,
+      "matched": 0,
+      "match_pct": 0.0,
+      "mismatches": [
+        "visit 'Screening' form 'Demographics' field count expected 8, got 4",
+        "visit 'Screening' form 'Informed Consent' field count expected 6, got 5",
+        "visit 'Screening' form 'Eligibility Criteria' field count expected 6, got 5",
+        "visit 'Screening' form 'Medical History' field count expected 5, got 4",
+        "visit 'Screening' form 'Prior and Concomitant Medications' field count expected 7, got 5",
+        "visit 'Screening' form 'Vital Signs' field count expected 8, got 7",
+        "visit 'Screening' form 'Local Laboratory - Hematology' field count expected 7, got 6",
+        "visit 'Baseline (Day 1)' form 'Visit Status' field count expected 6, got 5",
+        "visit 'Baseline (Day 1)' form 'Vital Signs' field count expected 8, got 7",
+        "visit 'Baseline (Day 1)' form 'Physical Examination' field count expected 6, got 4",
+        "visit 'Baseline (Day 1)' form '12-Lead ECG' field count expected 8, got 7",
+        "visit 'Baseline (Day 1)' form 'Randomization' field count expected 6, got 5",
+        "visit 'Baseline (Day 1)' form 'Study Drug Administration' field count expected 7, got 5",
+        "visit 'Baseline (Day 1)' form 'Disease Activity Assessment' field count expected 7, got 6",
+        "visit 'Week 4' form 'Visit Status' field count expected 6, got 5",
+        "visit 'Week 4' form 'Vital Signs' field count expected 8, got 7",
+        "visit 'Week 4' form 'Study Drug Administration' field count expected 7, got 5",
+        "visit 'Week 4' form 'Disease Activity Assessment' field count expected 7, got 6",
+        "visit 'Week 4' form 'Adverse Events' field count expected 8, got 4",
+        "visit 'Week 4' form 'Concomitant Medications' field count expected 7, got 5"
+      ]
+    },
+    "types": {
+      "expected": 195,
+      "matched": 152,
+      "match_pct": 77.95,
+      "mismatches": [
+        "field 'Subject Initials' MISSING in visit 'Screening' form 'Demographics'",
+        "field 'Sex at Birth' MISSING in visit 'Screening' form 'Demographics'",
+        "field 'Race' MISSING in visit 'Screening' form 'Demographics'",
+        "field 'Ethnicity' MISSING in visit 'Screening' form 'Demographics'",
+        "field 'Consented By' MISSING in visit 'Screening' form 'Informed Consent'",
+        "field 'Exclusionary Conditions' MISSING in visit 'Screening' form 'Eligibility Criteria'",
+        "field 'Body System' MISSING in visit 'Screening' form 'Medical History'",
+        "field 'Route' MISSING in visit 'Screening' form 'Prior and Concomitant Medications'",
+        "field 'Frequency' MISSING in visit 'Screening' form 'Prior and Concomitant Medications'",
+        "field 'Position' MISSING in visit 'Screening' form 'Vital Signs'",
+        "field 'Sample Condition' MISSING in visit 'Screening' form 'Local Laboratory - Hematology'",
+        "field 'Visit Type' MISSING in visit 'Baseline (Day 1)' form 'Visit Status'",
+        "field 'Position' MISSING in visit 'Baseline (Day 1)' form 'Vital Signs'",
+        "field 'Body Systems Examined' MISSING in visit 'Baseline (Day 1)' form 'Physical Examination'",
+        "field 'General Appearance' MISSING in visit 'Baseline (Day 1)' form 'Physical Examination'",
+        "field 'Overall Interpretation' MISSING in visit 'Baseline (Day 1)' form '12-Lead ECG'",
+        "field 'Treatment Arm Assigned' MISSING in visit 'Baseline (Day 1)' form 'Randomization'",
+        "field 'Route of Administration' MISSING in visit 'Baseline (Day 1)' form 'Study Drug Administration'",
+        "field 'Injection Site' MISSING in visit 'Baseline (Day 1)' form 'Study Drug Administration'",
+        "field 'Physician Global Assessment' MISSING in visit 'Baseline (Day 1)' form 'Disease Activity Assessment'"
+      ]
+    },
+    "required": {
+      "expected": 195,
+      "matched": 152,
+      "match_pct": 77.95,
+      "mismatches": [
+        "field 'Subject Initials' MISSING",
+        "field 'Sex at Birth' MISSING",
+        "field 'Race' MISSING",
+        "field 'Ethnicity' MISSING",
+        "field 'Consented By' MISSING",
+        "field 'Exclusionary Conditions' MISSING",
+        "field 'Body System' MISSING",
+        "field 'Route' MISSING",
+        "field 'Frequency' MISSING",
+        "field 'Position' MISSING",
+        "field 'Sample Condition' MISSING",
+        "field 'Visit Type' MISSING",
+        "field 'Position' MISSING",
+        "field 'Body Systems Examined' MISSING",
+        "field 'General Appearance' MISSING",
+        "field 'Overall Interpretation' MISSING",
+        "field 'Treatment Arm Assigned' MISSING",
+        "field 'Route of Administration' MISSING",
+        "field 'Injection Site' MISSING",
+        "field 'Physician Global Assessment' MISSING"
+      ]
+    },
+    "coded-pairs": {
+      "expected": 195,
+      "matched": 152,
+      "match_pct": 77.95,
+      "mismatches": [
+        "field 'Subject Initials' MISSING",
+        "field 'Sex at Birth' MISSING",
+        "field 'Race' MISSING",
+        "field 'Ethnicity' MISSING",
+        "field 'Consented By' MISSING",
+        "field 'Exclusionary Conditions' MISSING",
+        "field 'Body System' MISSING",
+        "field 'Route' MISSING",
+        "field 'Frequency' MISSING",
+        "field 'Position' MISSING",
+        "field 'Sample Condition' MISSING",
+        "field 'Visit Type' MISSING",
+        "field 'Position' MISSING",
+        "field 'Body Systems Examined' MISSING",
+        "field 'General Appearance' MISSING",
+        "field 'Overall Interpretation' MISSING",
+        "field 'Treatment Arm Assigned' MISSING",
+        "field 'Route of Administration' MISSING",
+        "field 'Injection Site' MISSING",
+        "field 'Physician Global Assessment' MISSING"
+      ]
+    },
+    "ranges": {
+      "expected": 195,
+      "matched": 93,
+      "match_pct": 47.69,
+      "mismatches": [
+        "field 'Subject Initials' MISSING",
+        "field 'Sex at Birth' MISSING",
+        "field 'Race' MISSING",
+        "field 'Ethnicity' MISSING",
+        "field 'Height' range expected [100,250,cm], got [,,cm]",
+        "field 'Weight' range expected [30,300,kg], got [,,kg]",
+        "field 'Consented By' MISSING",
+        "field 'Duration of Diagnosis' range expected [0,600,months], got [,,months]",
+        "field 'Exclusionary Conditions' MISSING",
+        "field 'Body System' MISSING",
+        "field 'Dose' range expected [0,10000,mg], got [,,mg]",
+        "field 'Route' MISSING",
+        "field 'Frequency' MISSING",
+        "field 'Systolic Blood Pressure' range expected [60,250,mmHg], got [,,mmHg]",
+        "field 'Diastolic Blood Pressure' range expected [30,150,mmHg], got [,,mmHg]",
+        "field 'Heart Rate' range expected [30,220,bpm], got [,,bpm]",
+        "field 'Respiratory Rate' range expected [6,60,breaths/min], got [,,breaths/min]",
+        "field 'Body Temperature' range expected [34,42,C], got [,,C]",
+        "field 'Position' MISSING",
+        "field 'Hemoglobin' range expected [3,25,g/dL], got [,,g/dL]"
+      ]
+    },
+    "skip-rules": {
+      "expected": 195,
+      "matched": 148,
+      "match_pct": 75.9,
+      "mismatches": [
+        "field 'Subject Initials' MISSING",
+        "field 'Sex at Birth' MISSING",
+        "field 'Race' MISSING",
+        "field 'Ethnicity' MISSING",
+        "field 'Consented By' MISSING",
+        "field 'Exclusionary Conditions' MISSING",
+        "field 'Body System' MISSING",
+        "field 'Route' MISSING",
+        "field 'Frequency' MISSING",
+        "field 'Position' MISSING",
+        "field 'Sample Condition' MISSING",
+        "field 'Visit Type' MISSING",
+        "field 'Position' MISSING",
+        "field 'Body Systems Examined' MISSING",
+        "field 'General Appearance' MISSING",
+        "field 'Abnormal Findings' skip expected ('General Appearance', 'ABN'), got None",
+        "field 'Overall Interpretation' MISSING",
+        "field 'Treatment Arm Assigned' MISSING",
+        "field 'Route of Administration' MISSING",
+        "field 'Injection Site' MISSING"
+      ]
+    }
+  },
+  "runtime": {
+    "escalations": "N/A",
+    "llm_calls": "N/A",
+    "human_decisions": "N/A"
+  }
+}

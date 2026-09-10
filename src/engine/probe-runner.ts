@@ -127,7 +127,10 @@ export function choiceDeepenPanelActions(
 
 export function isSafePaletteProbeCandidate(name: string): boolean {
   const n = (name || '').trim().toLowerCase();
-  if (!n) return false;
+  // Icon-only library tiles (FormCraft calculated/time/datetime) have empty
+  // accessible names. Still probe them — place-and-inspect is the adjudicator.
+  // Named dangerous chrome is rejected below.
+  if (!n) return true;
   if (n.startsWith('<-') || n.startsWith('←')) return false;
   if (matchesHintWord(n, 'ascend')) return false;
   // Persist / preview / deploy chrome — placing is not their job. Clicking one
@@ -137,6 +140,13 @@ export function isSafePaletteProbeCandidate(name: string): boolean {
   // field, and excluding it would cost a field the brief penalises heavily.
   if (matchesHintExact(n, 'non_palette_action', 'chrome')) return false;
   return true;
+}
+
+/** Stepper control that reveals the next property (FormCraft wizard). */
+export function findWizardAdvanceControl(obs: Observation): { name: string; handle: string } | null {
+  const ranked = rankCandidates(enumerateActions(obs), { hint: 'wizard_advance' });
+  const hit = ranked.find((r) => r.signals.some((s) => s.name === 'lexical'));
+  return hit ? { name: hit.el.name, handle: hit.el.handle } : null;
 }
 
 
@@ -405,6 +415,10 @@ export class ProbeRunner {
         //    arrived empty is roleless, so give it values and look again.
         let observed = after.observation;
         let probe = inspectPlacedControl(before.observation, observed);
+        if (!probe.declaredCanonical && probe.observedRole !== 'radiogroup' && probe.observedRole !== 'combobox') {
+          observed = await this.revealWizardTypeEvidence(before.observation, observed);
+          probe = inspectPlacedControl(before.observation, observed);
+        }
         if (probe.hasOptionsEditor && needsChoiceDeepen(probe)) {
           observed = await this.deepenChoiceProbe(before.observation, observed);
           probe = inspectPlacedControl(before.observation, observed);
@@ -625,6 +639,44 @@ export class ProbeRunner {
    * palette tile called "Check List" over the panel's "+ Add Value", because
    * both match the coded-value hint and the tile happens to come first.
    */
+  /**
+   * Wizard builders (FormCraft) show one property per step. After placing a
+   * tile the agent lands on the label step — no type picker, no options editor.
+   * Advance with the stepper until a type declaration or options editor appears
+   * so empty Orbit Set / Pick One can classify without a human gate.
+   */
+  private async revealWizardTypeEvidence(
+    beforePlace: Observation,
+    afterPlace: Observation,
+  ): Promise<Observation> {
+    let current = afterPlace;
+    for (let step = 0; step < 6; step += 1) {
+      const probe = inspectPlacedControl(beforePlace, current);
+      if (probe.declaredCanonical) return current;
+      if (probe.hasOptionsEditor) return current;
+      if (
+        probe.observedRole === 'radiogroup'
+        || probe.observedRole === 'radio'
+        || probe.observedRole === 'combobox'
+        || probe.observedRole === 'listbox'
+      ) {
+        return current;
+      }
+      const advance = findWizardAdvanceControl(current);
+      if (!advance) return current;
+      const before = current;
+      const clicked = await this.driver.click(advance.handle);
+      if (!clicked.ok) return current;
+      await this.sleep(180);
+      current = (await this.driver.perceiveAfterSettle(150)).observation;
+      if (diffObservations(before, current).added.length === 0
+        && diffObservations(before, current).changed.length === 0) {
+        return current;
+      }
+    }
+    return current;
+  }
+
   private async deepenChoiceProbe(
     beforePlace: Observation,
     afterPlace: Observation,
@@ -696,6 +748,10 @@ export class ProbeRunner {
 
     let observed = after.observation;
     let probe = inspectPlacedControl(before.observation, observed);
+    if (!probe.declaredCanonical && probe.observedRole !== 'radiogroup' && probe.observedRole !== 'combobox') {
+      observed = await this.revealWizardTypeEvidence(before.observation, observed);
+      probe = inspectPlacedControl(before.observation, observed);
+    }
     if (probe.hasOptionsEditor && needsChoiceDeepen(probe)) {
       observed = await this.deepenChoiceProbe(before.observation, observed);
       probe = inspectPlacedControl(before.observation, observed);
@@ -724,7 +780,29 @@ export class ProbeRunner {
     // instant and wrong. The previous filter here required the name to contain
     // save/freeze/commit/persist/bank; 'freeze' and 'bank' were env-rosetta's
     // own invented words, added so that fixture would pass.
-    const candidates = rankCommitCandidates(currentObs).map((r) => r.el);
+    let startObs = currentObs;
+    // FormCraft hides Commit behind a hamburger; open short/menu controls once
+    // so rankCommitCandidates can see it.
+    // Exact name match only — commit hints also list "done"/"create", which are
+    // visible on the wizard bar and must not skip opening the hamburger.
+    const hasCommitControl = (obs: Observation) =>
+      enumerateActionable(obs).some((e) => matchesHintExact(e.name, 'commit'));
+    if (!hasCommitControl(startObs)) {
+      const menuish = enumerateActions(startObs).filter((e) => {
+        const n = (e.name || '').trim();
+        if (!n) return false;
+        if (n.length <= 2) return true;
+        return matchesHintWord(n, 'menu') || matchesHintExact(n.toLowerCase(), 'menu');
+      });
+      for (const opener of menuish.slice(0, 3)) {
+        const clicked = await this.driver.click(opener.handle);
+        if (!clicked.ok) continue;
+        await this.sleep(150);
+        startObs = (await this.driver.perceive()).observation;
+        if (hasCommitControl(startObs)) break;
+      }
+    }
+    const candidates = rankCommitCandidates(startObs).map((r) => r.el);
 
     // A commit probe MUTATES state -- it clicks things, and a click can
     // navigate away. Cap the trials so a pathological page cannot cause an

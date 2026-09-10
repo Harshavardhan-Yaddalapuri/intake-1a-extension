@@ -100,9 +100,17 @@ for (const env of [
       probe.observedRole === 'generic' || probe.observedRole === 'none',
       `expected generic/none for empty choice; got ${probe.observedRole}`,
     );
+    // Type picker option value is structural: empty Dial Group / Beam Pick
+    // declare radio before options exist. Trust that so wizard/FormCraft can
+    // bind without deepen; deepen remains for platforms with no type picker.
+    assert.equal(probe.declaredCanonical, 'radio');
     assert.equal(
-      classifyTypeFromProbe('radio', probe).matches, false,
-      'still unclassifiable until deepen adds values',
+      classifyTypeFromProbe('radio', probe).matches, true,
+      'declaredCanonical radio classifies empty choice without deepen',
+    );
+    assert.equal(
+      classifyTypeFromProbe('multi_select', probe).matches, false,
+      'must not steal radio for multi_select',
     );
   });
 

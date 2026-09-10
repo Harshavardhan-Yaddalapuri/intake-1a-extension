@@ -491,8 +491,8 @@ function looksLikeCreateControl(name: string): boolean {
 function looksLikeVisitCreateControl(name: string): boolean {
   if (!looksLikeCreateControl(name)) return false;
   const n = normaliseText(name);
-  // Form / document create on the visit detail.
-  if (/(?:^|\s)(form|sheet|record|instrument|document|crf|source)(?:\s|$)/.test(n)) {
+  // Form / document create on the visit detail (incl. a11y-hostile "Survey").
+  if (/(?:^|\s)(form|sheet|record|instrument|document|crf|source|survey|questionnaire)(?:\s|$)/.test(n)) {
     return false;
   }
   // Designer page chrome.
@@ -500,6 +500,20 @@ function looksLikeVisitCreateControl(name: string): boolean {
     return false;
   }
   return true;
+}
+
+/**
+ * Form-create witness on a visit detail (not the visit list).
+ * Includes degrade-path nouns (survey / questionnaire) used when platforms
+ * rename "form" without ARIA names — names still come from text content.
+ */
+export function looksLikeFormCreateControl(name: string): boolean {
+  const n = normaliseText(name);
+  if (!n) return false;
+  if (!(n.includes('+') || /(?:^|\s)(add|new|create)(?:\s|$)/.test(n))) return false;
+  // Visit/phase/wave create belongs to the list, not the detail.
+  if (/(?:^|\s)(visit|phase|cycle|timepoint|event|wave)(?:\s|$)/.test(n)) return false;
+  return /(?:^|\s)(form|sheet|record|instrument|document|crf|source|survey|questionnaire)(?:\s|$)/.test(n);
 }
 
 export function atVisitList(
@@ -534,14 +548,7 @@ export function atVisitDetail(
   knownVisitNames: readonly string[] = [],
 ): boolean {
   const actionable = enumerateActionable(obs);
-  const hasFormCreate = actionable.some((e) => {
-    const n = normaliseText(e.name);
-    if (!n) return false;
-    // Must look like create AND mention a form-ish noun (not visit/phase).
-    if (!(n.includes('+') || /(?:^|\s)(add|new|create)(?:\s|$)/.test(n))) return false;
-    if (/(?:^|\s)(visit|phase|cycle|timepoint|event)(?:\s|$)/.test(n)) return false;
-    return /(?:^|\s)(form|sheet|record|instrument|document|crf|source)(?:\s|$)/.test(n);
-  });
+  const hasFormCreate = actionable.some((e) => looksLikeFormCreateControl(e.name));
   if (!hasFormCreate) return false;
   if (!visitName) return true;
 
@@ -1011,14 +1018,19 @@ export function findAddCodedValueControl(obs: Observation): ObservationElement |
     });
 }
 
-/** True when a button removes one coded-value / choice row. */
+/** True when a button removes one coded-value / choice row.
+ *
+ *  Must NOT match field-level delete ("Delete Element" / "Delete Node"): live
+ *  Rosetta v10 clicked that (last delete_element match in document order)
+ *  during coded-value nudge/prune and wiped every radio/single/multi field.
+ */
 export function isCodedValueRemoveControl(name: string): boolean {
   const n = name.trim().toLowerCase();
   if (!n) return false;
   // Hostile envs label the control "x" / "×" / "✕" with no remove word.
   if (n === 'x' || n === '×' || n === '✕' || n === '✖' || n === '⨯') return true;
-  // Lexical table owns "remove"/"delete" — never compare those literals here.
-  return matchesHintWord(n, 'delete_element') || matchesHintLoose(n, 'delete_element');
+  // Exact "remove" only (Nexus row chrome). Multi-word names are field/form deletes.
+  return n === 'remove';
 }
 
 /** Last remove control in document order — the row just appended by nudge. */

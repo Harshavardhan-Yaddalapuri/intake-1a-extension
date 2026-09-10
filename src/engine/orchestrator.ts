@@ -77,6 +77,8 @@ import {
   enumerateActions,
   enumerateByRoles,
   rankCandidates,
+  matchesHintWord,
+  matchesHintExact,
 } from '../bind/ranking';
 import {
   rankCommitCandidates,
@@ -2350,7 +2352,26 @@ export class Orchestrator {
     // "save", DOM order put the decoy first, it was clicked once, correctly
     // reported as not-a-commit, and then the form was abandoned uncommitted
     // and its entire contents lost on the next navigation.
-    const trials = rankCommitCandidates(observation)
+    // Reveal Commit when it lives behind a hamburger (FormCraft).
+    let commitObs = observation;
+    const hasCommitControl = (obs: Observation) =>
+      enumerateActionable(obs).some((e) => matchesHintExact(e.name, 'commit'));
+    if (!hasCommitControl(commitObs)) {
+      const menuish = enumerateActions(commitObs).filter((e) => {
+        const n = (e.name || '').trim();
+        if (!n) return false;
+        if (n.length <= 2) return true;
+        return matchesHintWord(n, 'menu') || matchesHintExact(n.toLowerCase(), 'menu');
+      });
+      for (const opener of menuish.slice(0, 3)) {
+        await this.driver.click(opener.handle);
+        await this.sleep(150);
+        commitObs = (await this.driver.perceive()).observation;
+        if (hasCommitControl(commitObs)) break;
+      }
+    }
+
+    const trials = rankCommitCandidates(commitObs)
       .map((r) => r.el)
       .filter((el) => !this.crossScreenChrome.has(normaliseLabel(el.name)));
     const MAX_COMMIT_TRIALS = 6;

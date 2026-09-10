@@ -49,7 +49,9 @@ export type HintKey =
   | 'chrome'
   | 'non_palette_action'
   | 'delete_element'
-  | 'panel_field';
+  | 'panel_field'
+  | 'wizard_advance'
+  | 'menu';
 
 /** Weak lexical priors. A word here may raise a candidate's rank. A word here
  *  may NEVER remove a candidate from the pool. Words are deliberately generic
@@ -58,9 +60,9 @@ export const LEXICAL_HINTS: Record<HintKey, readonly string[]> = {
   commit: ['save', 'commit', 'persist', 'apply', 'publish', 'submit', 'confirm', 'lock', 'freeze', 'create', 'finish', 'done', 'ok'],
   discard: ['cancel', 'discard', 'close', 'back', 'abandon', 'revert', 'undo'],
   palette: ['element', 'node', 'library', 'palette', 'control', 'widget', 'component', 'field', 'question', 'item'],
-  visit_create: ['visit', 'phase', 'timepoint', 'event', 'add', 'new', 'create', '+'],
+  visit_create: ['visit', 'phase', 'timepoint', 'event', 'wave', 'add', 'new', 'create', '+'],
   visit_open: ['visit', 'phase', 'timepoint', 'open', 'edit', 'view'],
-  form_create: ['form', 'document', 'source', 'sheet', 'record', 'crf', 'add', 'new', 'create', '+'],
+  form_create: ['form', 'document', 'source', 'sheet', 'record', 'crf', 'survey', 'questionnaire', 'instrument', 'add', 'new', 'create', '+'],
   form_open: ['form', 'document', 'open', 'edit', 'builder', 'design'],
   coded_values: ['value', 'option', 'choice', 'code', 'item', 'paste', 'bulk', 'list'],
   range: ['min', 'max', 'minimum', 'maximum', 'range', 'limit', 'bound', 'lower', 'upper'],
@@ -115,6 +117,10 @@ export const LEXICAL_HINTS: Record<HintKey, readonly string[]> = {
   // Property-panel inputs. They sit beside the canvas tile they describe, so
   // "which control IS the placed field" must not answer with one of these.
   panel_field: ['label', 'formula', 'expression', 'visibility'],
+  // Stepper 'Next' on wizard builders (FormCraft); not a commit.
+  wizard_advance: ['next'],
+  // Overflow / hamburger that reveals Commit when it is not on the bar.
+  menu: ['menu'],
 };
 
 /** Normalised form used by every hint predicate: collapse whitespace, lowercase. */

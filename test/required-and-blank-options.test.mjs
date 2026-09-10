@@ -75,9 +75,14 @@ test('row delete control labelled "x" is recognised', () => {
   assert.equal(isCodedValueRemoveControl('×'), true);
   assert.equal(isCodedValueRemoveControl('Remove'), true);
   assert.equal(isCodedValueRemoveControl('+ Add Value'), false);
+  // Must not match field-level delete — live Rosetta v10 pruned choice fields
+  // by clicking "Delete Element" (last delete_element match in document order).
+  assert.equal(isCodedValueRemoveControl('Delete Element'), false);
+  assert.equal(isCodedValueRemoveControl('Delete Node'), false);
   const o = obsOf(hostileRequiredPanel);
   const removes = findCodedValueRemoveControls(o);
   assert.ok(removes.length >= 2, `expected x buttons, got ${removes.map((e) => e.name)}`);
+  assert.ok(removes.every((e) => e.name.toLowerCase() === 'x'));
 });
 
 test('"+ Add Choice" is accepted as a row-adding control (Nexus)', () => {

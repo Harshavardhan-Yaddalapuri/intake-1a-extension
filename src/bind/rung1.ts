@@ -408,10 +408,28 @@ export function classifyTypeFromProbe(
     };
   }
 
+  // Wizard / empty-canvas choice: type picker already stores the canonical id
+  // (option value="radio") before any options exist on the canvas. Trust that
+  // declaration when the observed role has not materialised yet — otherwise
+  // FormCraft Orbit Set / Pick One never bind (live wizard v10: 8 fields).
+  if (
+    probe.declaredCanonical === canonical
+    && (canonical === 'radio' || canonical === 'single_select' || canonical === 'multi_select')
+    && (probe.observedRole === 'none' || probe.observedRole === 'generic')
+  ) {
+    return {
+      matches: true,
+      evidence: `${canonical}: type picker declares "${probe.declaredCanonical}" (canvas role unrealised)`,
+    };
+  }
+
   // Choice types
   if (canonical === 'single_select') {
     if (probe.observedRole === 'combobox' || probe.observedRole === 'listbox') {
       return { matches: true, evidence: `single_select: role=${probe.observedRole}, dropdown selection` };
+    }
+    if (probe.declaredCanonical === 'single_select') {
+      return { matches: true, evidence: `single_select: type picker declares single_select` };
     }
     return { matches: false, evidence: `single_select: expected combobox/listbox, got ${probe.observedRole}` };
   }
@@ -443,6 +461,9 @@ export function classifyTypeFromProbe(
   if (canonical === 'radio') {
     if (probe.observedRole === 'radiogroup' || probe.observedRole === 'radio') {
       return { matches: true, evidence: `radio: role=${probe.observedRole}` };
+    }
+    if (probe.declaredCanonical === 'radio') {
+      return { matches: true, evidence: `radio: type picker declares radio` };
     }
     if (probe.hasOptionsEditor && probe.mutualExclusivity === 'single' && probe.observedRole !== 'combobox') {
       return { matches: true, evidence: `radio: choice control with single exclusivity` };
