@@ -77,8 +77,7 @@ Requires Node 20+ and Chrome.
 ```bash
 git clone <this-repo>
 cd intake-1a-extension
-# graders: use branch fix/skip-logic-and-formula-writes
-# (or the worktree .claude/worktrees/review-queue-signal if present)
+git checkout fix/skip-logic-and-formula-writes
 npm install
 npm run typecheck
 npm run build          # writes dist/
@@ -89,8 +88,8 @@ npm test               # node --test
 2. Serve the assignment eSource mock (the take-home folder with `esource-mock`) locally, e.g. Vite on `http://127.0.0.1:5173`, or any static server for that app.
 3. Open the mock in a tab. Click the extension icon → open the **side panel**.
 4. Pre-Flight → upload `abc-101-study.ir.json` (from the take-home `data/` folder, also referenced from docs artifacts).
-5. Optional: open the side panel and paste an OpenRouter key if you want Rung 2
-   (saved in local Chrome storage only).
+5. Optional Rung 2: enter an OpenRouter API key in the side panel (kept in
+   local Chrome storage only; nothing is bundled with the extension).
 6. Start build → review capability report → **Resume**. Use Queue for escalations.
 
 Hostile generalization mocks (optional): see `generalization/RUNBOOK.md` (ports 4091–4094).
@@ -121,7 +120,7 @@ probe disagrees), visit/form open failures after retry, and verify AMBIGUOUS /
 FAILED items that need a human call. Structural misses do not silently invent
 controls.
 
-**What the reviewer sees (side panel):**
+**Side panel:**
 
 - **Pre-Flight** — IR upload, capability report (which ops bound), Resume.
 - **Queue** — one card per escalation: intent, observed candidates, binding
@@ -172,8 +171,8 @@ clear a ~70% unseen bar; zero-ARIA field write remains the honest gap.
 Evidence: `docs/generalization-runs/LIVE_V14_RESULTS_d220d9d.md` and
 `docs/generalization-runs/*-after-v14-score.json`.
 
-Submit package pointers: `docs/generalization-runs/SUBMIT_BASELINE.md`,
-`docs/SUBMIT_CHECKLIST.md`.
+More detail on the live score tip and artifacts:
+`docs/generalization-runs/SUBMIT_BASELINE.md`.
 
 ## Special considerations scorecard
 
@@ -235,20 +234,21 @@ zero form-domain knowledge, zero LLM calls.
   end-to-end; scores in `docs/generalization-runs/*-after-v14-score.json`.
 - **Unit tests:** `npm test` (perceive / bind / verify / wizard / nav-gate /
   skip-formula suites).
-- **Screen recording:** I am submitting a separate 2–3 minute unedited
-  Mock A run that shows the side panel and human gate (not stored in git).
+- **Screen recording:** a separate 2–3 minute unedited Mock A run showing
+  the side panel and human gate is included with the submission (kept out of
+  git because of size).
 
 ## Where it breaks (and what it does)
 
 | Failure | Behavior |
 |---|---|
-| Type cannot be bound | Escalate to Queue with evidence; do not invent a control |
+| Type cannot be bound | Escalate to Queue with evidence; no invented control |
 | Visit/form open fails | Retry once; escalate; continue only if surface matches after Approve |
-| Verify FAILED / AMBIGUOUS | Park for human or skip-span dependents — no silent wrong writes |
+| Verify FAILED / AMBIGUOUS | Park for human review or skip dependents; no silent wrong writes |
 | Wizard terminal `Done` | Treated as decoy, not Commit (avoids discarding drafts) |
 | Zero-ARIA field place | Visits/forms may create; fields often stay 0 → low overall score |
 | Mock A `min=0` ranges | Five fields store empty min (known residual) |
-| Service worker sleep | MV3 alarms keep-alive during long runs; reload extension if stalled |
+| Service worker sleep | MV3 alarms keep the worker alive on long runs; a manual reload recovers a stall |
 
 ## Runtime
 
@@ -265,26 +265,25 @@ Chrome, human approvals only when gated:
 Escalation-heavy runs take longer; batch-approving types after the first few
 cards cuts a lot of waiting.
 
-## What we would build next (two more weeks)
+## Next steps (two more weeks)
 
-1. **Zero-ARIA field placement** without regressing FormCraft — isolated
-   degrade path for nameless generic tiles + Label-via-groupText, gated so
-   named ARIA UIs keep name-first bind (v15 lesson).
-2. **Stronger commit discrimination** across hamburger / Freeze / Lock / Done.
-3. **Idempotency demo** — automated second-pass harness + recording checklist.
-4. **Range `min=0` write** edge on Mock A.
-5. **Rung 2 eval** — measure OpenRouter lift on icon-only palettes only.
-6. **Flake harness** — one-command hostile drive + score for CI-like loops.
+1. Reliable field placement on zero-ARIA designers, without regressing
+   named-ARIA platforms like FormCraft.
+2. Stronger commit discrimination across hamburger / Freeze / Lock / Done.
+3. An automated second-pass harness to demonstrate idempotency on Mock A.
+4. Fix the Mock A range `min=0` write edge cases.
+5. Measure whether optional Rung 2 (OpenRouter) helps on icon-only palettes.
+6. A one-command hostile drive + score loop to catch flakes earlier.
 
 ## AI tools used
 
 | Tool | Helped | Got in the way |
 |---|---|---|
-| Cursor / Grok Bot (local coaching) | Fast iterate on bind/verify, live score loops, docs | Cloud Agents unavailable on plan — no remote PR agent |
-| Chrome live + `__groundTruth` / `score.py` | Ground-truth overall % on friendly + hostile mocks | Manual reload / SW lifetime flake |
-| OpenRouter (optional Rung 2) | Available for unbound type ranking via side-panel key | Not required for v14 board; free-model churn |
-| Unit tests (`node:test` + jsdom) | Locked nav-gate, Done-decoy, skip/formula regressions | jsdom ≠ live cursor/CSS — hostile gaps still need Chrome |
+| Cursor / Grok Bot | Faster iteration on bind/verify, scoring loops, and docs | Cloud Agents were unavailable on this plan |
+| Chrome + `__groundTruth` / `score.py` | Honest overall % on friendly and hostile mocks | Extension reload and service-worker lifetime flake |
+| OpenRouter (optional Rung 2) | Fallback ranking when structural bind fails | Not needed for the reported v14 board; free-tier model churn |
+| `node:test` + jsdom | Locked nav-gate, Done-decoy, skip/formula behavior | jsdom is not live Chrome — hostile gaps still need a real browser |
 
-I do not ship API keys in the repo. Rung 2 is optional: paste an
-OpenRouter key in the side panel if you want it; it stays in local Chrome
-storage only.
+API keys are not included in the repository. Optional Rung 2 uses an
+OpenRouter key entered in the side panel and stored only in local Chrome
+storage.
