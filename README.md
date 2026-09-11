@@ -44,6 +44,18 @@ Architecture: B-backbone composite (Platform Contract + graded binding ladder
 - **ACT** cannot decide. It replays bindings against IR values.
 - **VERIFY** cannot fix. It compares read-back against declared intent.
 
+### Perceive → decide → act → confirm
+
+1. **Perceive** — content script walks interactive DOM into an Observation
+   (role, accessible name, handle, state, options). No IR types, no LLM.
+2. **Decide** — service-worker orchestrator compiles the IR into a plan, binds
+   contract ops (visit/form/field create, type, options, required, ranges,
+   skip, formulas) via the binding ladder, and chooses the next step.
+3. **Act** — content script executes bound recipes (click, setValue, select).
+4. **Confirm** — VERIFY reads the page back and marks VERIFIED / FAILED /
+   AMBIGUOUS. Failures escalate or retry; successes unlock dependents.
+5. **Human gate** — AMBIGUOUS / unbound types park in the side-panel Queue.
+
 ## Layout
 
     src/perceive/         Accessibility-tree Observation serializer
@@ -58,14 +70,29 @@ Architecture: B-backbone composite (Platform Contract + graded binding ladder
     generalization/       4 hostile mock environments + scoring harness
     docs/                 Live GT dumps + generalization evidence
 
-## Build and test
+## Setup (load unpacked)
 
-    npm install
-    npm run typecheck   # tsc --noEmit
-    npm run build       # esbuild -> dist/
-    npm test            # node --test
+Requires Node 20+ and Chrome.
 
-Load `dist/` as an unpacked Chrome extension.
+```bash
+git clone <this-repo>
+cd intake-1a-extension
+# graders: use branch fix/skip-logic-and-formula-writes
+# (or the worktree .claude/worktrees/review-queue-signal if present)
+npm install
+npm run typecheck
+npm run build          # writes dist/
+npm test               # node --test
+```
+
+1. Chrome → `chrome://extensions` → Developer mode → **Load unpacked** → select `dist/`.
+2. Serve the assignment eSource mock (the take-home folder with `esource-mock`) locally, e.g. Vite on `http://127.0.0.1:5173`, or any static server for that app.
+3. Open the mock in a tab. Click the extension icon → open the **side panel**.
+4. Pre-Flight → upload `abc-101-study.ir.json` (from the take-home `data/` folder, also referenced from docs artifacts).
+5. Optional: side panel → OpenRouter API key for Rung 2 (stored only in `chrome.storage.local`, never bundled).
+6. Start build → review capability report → **Resume**. Use Queue for escalations.
+
+Hostile generalization mocks (optional): see `generalization/RUNBOOK.md` (ports 4091–4094).
 
 ## How it works
 
@@ -88,10 +115,20 @@ Load `dist/` as an unpacked Chrome extension.
 
 ## Human gate design
 
-- Per-TYPE approval (one confirm covers all fields of that type).
-- Evidence: attempted binding, observation, rung, suspected trap.
-- One-click type override.
-- Batch approve remaining after review.
+**What escalates:** type mapping the ladder cannot confirm (Rung 0–2 miss or
+probe disagrees), visit/form open failures after retry, and verify AMBIGUOUS /
+FAILED items that need a human call. Structural misses do not silently invent
+controls.
+
+**What the reviewer sees (side panel):**
+
+- **Pre-Flight** — IR upload, capability report (which ops bound), Resume.
+- **Queue** — one card per escalation: intent, observed candidates, binding
+  rung, suspected trap, Approve / Override type / Skip.
+- **Report** — live progress and final verified / failed / skipped counts.
+
+Approvals are **per canonical type** where possible (approve `date` once, reuse).
+Batch approve is available after reviewing a few items.
 
 ## Results (proven)
 
@@ -156,6 +193,17 @@ Proven against Mock A + v14 hostile live runs (`d220d9d`). Zero-ARIA remains the
 | Human gate / traceability | Yes | Yes |
 | No `__readState` in agent build path | Yes | Yes |
 
+## Generalization approach
+
+Designed for unknown designers, not Mock-A selectors:
+
+- Accessibility-first perceive; check-before-create idempotency keys from IR ids
+- Graded type ladder (structural → probe → optional LLM → human)
+- Nav-gate must re-perceive after Approve (no skip-entire-span on Approve alone)
+- Commit ranking ignores bare wizard `Done` decoys
+- Evidence: live scores on four **modified** hostile mocks (second-mock style),
+  not only the assignment mock — see Results above
+
 ## Generalization harness
 
 Four hostile mocks in `generalization/`:
@@ -177,18 +225,63 @@ Numbered index + structural handle, role, name, name-source, state, option
 vocabulary. Diff against previous snapshot. Zero canonical-type knowledge,
 zero form-domain knowledge, zero LLM calls.
 
-## Known limitations
+## By-hand / harness verification
 
-- Three of four hostile proxies score ≥70% live (v14); zero-ARIA
-  (`env-hostile-a11y`) still fails field placement after visit/form create.
-- Lexical vocabulary hints (e.g. wave/survey, wizard Next) are weak priors —
-  structural perceive/bind/verify is the real generalization path.
-- Idempotency is implemented (skip already-verified / check-first create) but
-  a fresh second Mock A recording is still recommended for graders.
-- Five Mock A range `min=0` edge cases remain on the friendly mock.
+- **Mock A live:** full study build scored with `__groundTruth()` +
+  `generalization/score.py` → 99.53% (`docs/after-live-run-skipfix4.json`).
+  Skip 13/13 and formulas 7/7 confirmed in that dump; queue clean on best run.
+- **Hostile live (v14):** four modified mocks in `generalization/` driven
+  end-to-end; scores in `docs/generalization-runs/*-after-v14-score.json`.
+- **Unit tests:** `npm test` (perceive / bind / verify / wizard / nav-gate /
+  skip-formula suites).
+- **Screen recording:** not checked into the repo — attach a 2–3 minute
+  unedited Mock A run (side panel + gate visible) with the submission.
+
+## Where it breaks (and what it does)
+
+| Failure | Behavior |
+|---|---|
+| Type cannot be bound | Escalate to Queue with evidence; do not invent a control |
+| Visit/form open fails | Retry once; escalate; continue only if surface matches after Approve |
+| Verify FAILED / AMBIGUOUS | Park for human or skip-span dependents — no silent wrong writes |
+| Wizard terminal `Done` | Treated as decoy, not Commit (avoids discarding drafts) |
+| Zero-ARIA field place | Visits/forms may create; fields often stay 0 → low overall score |
+| Mock A `min=0` ranges | Five fields store empty min (known residual) |
+| Service worker sleep | MV3 alarms keep-alive during long runs; reload extension if stalled |
+
+## Runtime
+
+Rough wall-clock for a full IR build (4 visits / 28 forms / 195 fields), cold
+Chrome, human approvals only when gated:
+
+| Platform | Approx. duration |
+|---|---|
+| Friendly Mock A | ~8–15 minutes when the queue stays clean |
+| Rosetta / swapped (v14-class) | ~15–30 minutes |
+| Wizard | ~20–40 minutes (stepper + library open) |
+| Hostile a11y | Shorter wall time but little field progress |
+
+Escalation-heavy runs take longer; batch-approving types after the first few
+cards cuts a lot of waiting.
+
+## What we would build next (two more weeks)
+
+1. **Zero-ARIA field placement** without regressing FormCraft — isolated
+   degrade path for nameless generic tiles + Label-via-groupText, gated so
+   named ARIA UIs keep name-first bind (v15 lesson).
+2. **Stronger commit discrimination** across hamburger / Freeze / Lock / Done.
+3. **Idempotency demo** — automated second-pass harness + recording checklist.
+4. **Range `min=0` write** edge on Mock A.
+5. **Rung 2 eval** — measure OpenRouter lift on icon-only palettes only.
+6. **Flake harness** — one-command hostile drive + score for CI-like loops.
 
 ## AI tools used
 
-Local Chrome live runs + Cursor / Grok Bot coaching. Optional Rung 2 via
-OpenRouter (side-panel key → `chrome.storage.local`; never bundled).
-Cloud coding agents were unavailable for this repo on the current plan.
+| Tool | Helped | Got in the way |
+|---|---|---|
+| Cursor / Grok Bot (local coaching) | Fast iterate on bind/verify, live score loops, docs | Cloud Agents unavailable on plan — no remote PR agent |
+| Chrome live + `__groundTruth` / `score.py` | Ground-truth overall % on friendly + hostile mocks | Manual reload / SW lifetime flake |
+| OpenRouter (optional Rung 2) | Available for unbound type ranking via side-panel key | Not required for v14 board; free-model churn |
+| Unit tests (`node:test` + jsdom) | Locked nav-gate, Done-decoy, skip/formula regressions | jsdom ≠ live cursor/CSS — hostile gaps still need Chrome |
+
+No API keys are bundled. Do not commit `.env` / `.openrouter_key`.
