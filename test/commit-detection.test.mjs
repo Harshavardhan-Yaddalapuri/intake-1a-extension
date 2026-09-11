@@ -94,22 +94,29 @@ test('navigating away is never mistaken for a commit', () => {
   );
 });
 
-test('departure is detected after the fact, because it cannot be predicted', () => {
+test('departure is detected after the fact, not predicted', () => {
   // Live: with nav chrome filtered the remaining order was
   //   Save -> "← Screening" -> "Preview Form" -> Activate
   // so a Save that went unrecognised meant clicking the breadcrumb (which
   // discards the working copy) and then Preview (which opened the modal that
   // made the next form's designer unreachable).
   //
-  // Filtering those out BEFOREHAND was tried and does not work: the ascend
-  // ranker misses the breadcrumb on this surface and flags "+ Page", which
-  // goes nowhere. So the loop stops as soon as a click has demonstrably left.
+  // The ascend ranker used to miss the breadcrumb here: it sits in the
+  // builder's largest control cluster, which is excluded structurally as the
+  // palette, and "+ Page" ranked top and goes nowhere. rankAscendCandidates
+  // now exempts ascend-shaped controls from that exclusion, so the breadcrumb
+  // ranks first -- above four top-nav tabs that lexically resemble a visit
+  // list and do not lead to one.
   const visitNames = ['Screening', 'Baseline (Day 1)', 'Week 4', 'End of Treatment (Week 12)'];
   const ascendNames = rankAscendCandidates(DIRTY, visitNames).map((e) => e.name);
-  assert.ok(
-    !ascendNames.includes('← Screening'),
-    'documents why the predictive filter was abandoned: it misses the breadcrumb here',
+  assert.equal(
+    ascendNames[0], '← Screening',
+    'the control naming a known visit outranks nav chrome and "+ Page"',
   );
+
+  // Ranking it first is still only a guess about an unseen platform, so the
+  // commit loop does not rely on it: it stops as soon as a click has
+  // demonstrably left the surface, whichever control did it.
 
   const elsewhere = observe(doc(`${TOP_NAV}<h2>Visit Schedule</h2>
     <table><tbody><tr><td><button class="link">Screening</button></td></tr></tbody></table>

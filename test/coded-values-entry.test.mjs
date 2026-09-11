@@ -18,7 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { observe } from '../dist/perceive-core.mjs';
-import { findByRole } from '../dist/bind-rung0.mjs';
+import { findByRole, findAddCodedValueControl } from '../dist/bind-rung0.mjs';
 
 const valueRow = (i, code, label) => `
 <div class="value-row">
@@ -49,8 +49,7 @@ const rowLabelsOf = (o, codeCount) => {
     .filter((c) => !codes.some((ci) => ci.el.handle === c.el.handle));
   return labels.slice(Math.max(0, labels.length - codeCount));
 };
-const addRowControlOf = (o) => findByRole(o, 'button', { contains: 'add' })
-  .filter((b) => b.el.name.toLowerCase().includes('value'))[0]?.el;
+const addRowControlOf = (o) => findAddCodedValueControl(o);
 
 test('an editor with no rows yet offers no code inputs — but does offer a way to add one', () => {
   const o = obsOf([]);
@@ -80,4 +79,12 @@ test("a row label is never the element's own Label field", () => {
     rowLabels[0].el.handle, ownLabel.el.handle,
     "writing an option label into the field's own Label would rename the field",
   );
+});
+
+test('"Apply Pasted Values" is not mistaken for the row-adding control', () => {
+  const o = obsOf([]);
+  const add = addRowControlOf(o);
+  assert.ok(add, 'Add Value must still be found');
+  assert.equal(add.name, '+ Add Value');
+  assert.ok(!add.name.toLowerCase().includes('paste'));
 });

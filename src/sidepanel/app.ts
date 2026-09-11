@@ -717,6 +717,68 @@ function logEvent(event: string, detail: string): void {
   runtimeLog.push({ timestamp: Date.now(), event, detail });
 }
 
+
+// ---------------------------------------------------------------------------
+// Keep the service worker alive while this panel is open.
+// ---------------------------------------------------------------------------
+
+function connectKeepAlive(): void {
+  try {
+    const port = chrome.runtime.connect({ name: 'sidepanel-keepalive' });
+    port.onDisconnect.addListener(() => {
+      // Port drops on worker restart OR transient disconnect while the panel
+      // sits on a blocking gate. Reconnect first and ask the worker whether a
+      // run is still alive before declaring the build stopped — otherwise a
+      // keep-alive blip collapses the queue UI while execute() is still
+      // waiting on HUMAN_DECISION.
+      setTimeout(async () => {
+        connectKeepAlive();
+        try {
+          const state = await chrome.runtime.sendMessage({ type: 'GET_RUN_STATE' });
+          const stillGoing =
+            state?.phase === 'executing' ||
+            state?.phase === 'paused' ||
+            (Array.isArray(state?.escalationQueue) &&
+              state.escalationQueue.some((e: { blocking?: boolean }) => e.blocking));
+          if (stillGoing) {
+            if (state.phase === 'paused') {
+              isPaused = true;
+              isRunning = false;
+            } else {
+              isRunning = true;
+              isPaused = false;
+            }
+            if (Array.isArray(state.escalationQueue)) {
+              for (const item of state.escalationQueue) {
+                if (!escalationQueue.some((q) => q.key === item.key)) {
+                  handleEscalation(item);
+                }
+              }
+            }
+            return;
+          }
+        } catch {
+          // Worker really gone — fall through.
+        }
+        if (isRunning || isPaused) {
+          isRunning = false;
+          isPaused = false;
+          updateStatus(
+            'idle',
+            'Build agent stopped (extension worker restarted). Click Start to resume from saved progress.',
+          );
+          $('pause-btn')?.classList.add('hidden');
+          $('resume-btn')?.classList.add('hidden');
+          $('start-btn')?.classList.remove('hidden');
+        }
+      }, 750);
+    });
+  } catch {
+    setTimeout(connectKeepAlive, 1500);
+  }
+}
+connectKeepAlive();
+
 // ---------------------------------------------------------------------------
 // On load: reconnect to running orchestrator.
 // ---------------------------------------------------------------------------

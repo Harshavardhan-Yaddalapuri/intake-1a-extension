@@ -54,14 +54,23 @@ function stripComments(source) {
  *
  * so that is what this scans for. A word passed as data — `{ hint: 'commit' }`,
  * `makeBinding('ctx.commit', ...)` — is not a gate and is not flagged.
+ *
+ * Comparisons against our OWN vocabulary are likewise not gates. `item.kind`
+ * is a PlanStepKind and `step.op` a ContractOperation: both are closed unions
+ * declared in this repo, checked by tsc, and identical on every platform. A
+ * word only becomes a gate when it is tested against a name the PLATFORM
+ * chose, so `.kind` / `.op` operands are exempt while every other operand —
+ * `e.name`, `n`, `label` — is not.
  */
 function gatingComparisons(source) {
   const code = stripComments(source);
   const offenders = [];
-  const pattern = /(?:\.includes|\.startsWith|\.endsWith|===|!==|==|!=)\s*\(?\s*'([^'\n]*)'/g;
+  const pattern =
+    /(\.kind|\.op)?\s*(?:\.includes|\.startsWith|\.endsWith|===|!==|==|!=)\s*\(?\s*'([^'\n]*)'/g;
   let m;
   while ((m = pattern.exec(code)) !== null) {
-    const literal = m[1].toLowerCase();
+    if (m[1]) continue; // our own closed vocabulary, not the platform's
+    const literal = m[2].toLowerCase();
     for (const word of UI_WORDS) {
       if (literal.includes(word)) {
         offenders.push(`compares against "${literal}" (contains "${word}")`);

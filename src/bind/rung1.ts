@@ -27,6 +27,7 @@ import type {
   CanonicalType,
   ContractOpId,
 } from '../shared/contract';
+import { CANONICAL_TYPES } from '../shared/contract';
 import type { Observation, ObservationElement, Diff } from '../perceive/core';
 import { LEXICAL_HINTS, type HintKey } from './ranking';
 import { diffObservations } from '../perceive/core';
@@ -62,6 +63,13 @@ export interface ProbeResult {
   hasFormulaEditor?: boolean;
   hasDatePickerOptions?: boolean;
   hasDecimalPlaces?: boolean;
+  /**
+   * Canonical type declared by the property-panel type picker (Node Type /
+   * Element Type). Hostile envs expose the canonical id as <select>.value;
+   * when present this is stronger than role isomorphism (every Free/date
+   * tile is a textbox).
+   */
+  declaredCanonical?: CanonicalType | null;
   /** Evidence strings for the binding record. */
   evidence: string[];
   /** Whether the probe was destructive (creation was immediately persistent). */
@@ -141,6 +149,41 @@ function namesSuggestIn(elements: readonly ObservationElement[], hint: HintKey):
   return elements.some((e) => matchesHint(e.name, hint));
 }
 
+/** Read the canonical type from a Node Type / Element Type picker in the panel.
+ *
+ *  env-swapped-controls labels it "Node Type" and stores the canonical id in
+ *  the option value; env-rosetta uses "Element Type" the same way. Without
+ *  this, Free String / Glyph Line / Solar Mark / Calendar Day are all bare
+ *  textboxes and first-wins probe binds date to the wrong tile (or, when the
+ *  probe navigates away first, leaves date unbound).
+ */
+export function readDeclaredCanonical(
+  panelControls: readonly ObservationElement[],
+): CanonicalType | null {
+  const picker = panelControls.find(
+    (e) =>
+      (e.role === 'combobox' || e.role === 'listbox') &&
+      /\btype\b/i.test(e.name),
+  );
+  if (!picker) return null;
+  const raw = (picker.state.value ?? '').trim().toLowerCase().replace(/[\s/-]+/g, '_');
+  if ((CANONICAL_TYPES as readonly string[]).includes(raw)) {
+    return raw as CanonicalType;
+  }
+  // Friendly mocks sometimes store the visible label as the value ("Date").
+  const label = (picker.state.value ?? '').trim().toLowerCase();
+  const fromLabel: Record<string, CanonicalType> = {
+    date: 'date',
+    time: 'time',
+    'date/time': 'datetime',
+    datetime: 'datetime',
+    'date time': 'datetime',
+  };
+  if (fromLabel[label]) return fromLabel[label];
+  return null;
+}
+
+
 /**
  * Place a control on the scratch form, inspect its role, option structure,
  * and mutual exclusivity from the DIFF, then discard.
@@ -173,13 +216,21 @@ export function inspectPlacedControl(
   const canvasControls = addedElements.filter((e) => !isPropertyEditorControl(e));
   const panelControls = addedElements.filter((e) => isPropertyEditorControl(e));
 
+  // Prefer NAMED canvas controls. Required/Hidden checkboxes in hostile envs
+  // often have empty accessible names (label[for] points at a missing id), so
+  // they survive the property_editor name filter and look like the placed
+  // field. Reading them made empty Dial Group / Beam Pick look like
+  // checkbox+optionsEditor (= multi_select), and radio never bound.
+  const namedCanvas = canvasControls.filter((e) => (e.name || '').trim() !== '');
+  const canvasForPlace = namedCanvas.length > 0 ? namedCanvas : [];
+
   const DATA_ROLES = [
     'checkbox', 'radio', 'combobox', 'listbox', 'radiogroup',
     'spinbutton', 'textbox', 'switch', 'slider',
   ];
   const placedCandidate =
-    canvasControls.find((e) => DATA_ROLES.includes(e.role)) ??
-    canvasControls[0];
+    canvasForPlace.find((e) => DATA_ROLES.includes(e.role)) ??
+    canvasForPlace[0];
 
   // 2. Detect affordances.
   //
@@ -207,10 +258,15 @@ export function inspectPlacedControl(
 
   const hasFormulaEditor = namesSuggestIn(panelControls, 'formula');
   const hasDatePickerOptions = namesSuggestIn(panelControls, 'date_options');
+  // Prefer the live panel on afterObs: sequential palette probes leave prior
+  // tiles on the canvas, so the type picker may not appear in the diff even
+  // though it now shows the newly selected element's canonical type.
+  const declaredCanonical =
+    readDeclaredCanonical(afterObs.elements.filter((e) => matchesHint(e.name, 'property_editor')))
+    ?? readDeclaredCanonical(panelControls);
 
-
-  // Find placed control from canvas controls, or fallback to addedElements
-  let placedControl = canvasControls.find(
+  // Find placed control from named canvas controls only (see canvasForPlace).
+  let placedControl = canvasForPlace.find(
     (e) =>
       e.role === 'checkbox' ||
       e.role === 'radio' ||
@@ -223,26 +279,41 @@ export function inspectPlacedControl(
       e.role === 'button',
   );
 
-  if (!placedControl && canvasControls.length > 0) {
-    placedControl = canvasControls[0];
+  if (!placedControl && canvasForPlace.length > 0) {
+    placedControl = canvasForPlace[0];
   }
 
+  // NEVER fall back to the property panel. An empty choice control adds no
+  // interactive canvas node ("No values defined."); the panel's Label /
+  // Required / type picker always appear alongside it. Reading those as the
+  // placed field made Dial Group / Beam Pick look like a textbox, skipped
+  // deepen, and escalated radio to the human gate on clear probe-able tiles.
   if (!placedControl) {
-    placedControl = addedElements.find(
-      (e) =>
-        e.role === 'combobox' ||
-        e.role === 'listbox' ||
-        e.role === 'radiogroup' ||
-        e.role === 'checkbox' ||
-        e.role === 'radio' ||
-        e.role === 'spinbutton' ||
-        e.role === 'textbox',
-    );
-  }
-
-  if (!placedControl) {
+    // Empty date/text tiles can leave only the property panel visible when
+    // the canvas control is nameless; the type picker still declares what
+    // was placed, so date need not escalate to a human gate.
+    if (declaredCanonical) {
+      return {
+        observedRole: 'none',
+        observedOptions: [],
+        mutualExclusivity: 'n/a',
+        hasOptionsEditor,
+        hasRangeEditor,
+        hasFormulaEditor,
+        hasDatePickerOptions,
+        hasDecimalPlaces,
+        declaredCanonical,
+        evidence: [
+          `property panel type picker declares canonical "${declaredCanonical}" (no named canvas control yet)`,
+        ],
+        destructive: false,
+        discarded: false,
+      };
+    }
     return {
-      observedRole: 'none',
+      // 'generic' + hasOptionsEditor is the deepen signal: the panel says this
+      // is a choice control, the canvas has not realised it yet.
+      observedRole: hasOptionsEditor ? 'generic' : 'none',
       observedOptions: [],
       mutualExclusivity: 'n/a',
       hasOptionsEditor,
@@ -250,7 +321,12 @@ export function inspectPlacedControl(
       hasFormulaEditor,
       hasDatePickerOptions,
       hasDecimalPlaces,
-      evidence: ['no new interactive element detected in diff after placing control'],
+      declaredCanonical: null,
+      evidence: [
+        hasOptionsEditor
+          ? 'property panel offers an options editor but no interactive control appeared on the canvas yet (empty choice)'
+          : 'no new interactive element detected in diff after placing control',
+      ],
       destructive: false,
       discarded: false,
     };
@@ -282,6 +358,10 @@ export function inspectPlacedControl(
     }
   }
 
+  if (declaredCanonical) {
+    evidence.push(`property panel type picker declares canonical "${declaredCanonical}"`);
+  }
+
   return {
     observedRole: placedControl.role,
     observedOptions: placedControl.options,
@@ -291,6 +371,7 @@ export function inspectPlacedControl(
     hasFormulaEditor,
     hasDatePickerOptions,
     hasDecimalPlaces,
+    declaredCanonical,
     evidence,
     destructive: false,
     discarded: false,
@@ -308,15 +389,65 @@ export function classifyTypeFromProbe(
   canonical: CanonicalType,
   probe: ProbeResult,
 ): { matches: boolean; evidence: string } {
+  // Property-panel type picker is structural (option value / selection), not a
+  // name guess. Scoped to the textbox-isomorphic family: Free String / Glyph
+  // Line / Solar Mark / Calendar Day / Clock Time all place a textbox, so role
+  // alone cannot separate text from date. Choice types still need deepen /
+  // role evidence — an empty Dial Group's picker says "radio" but the canvas
+  // has not realised options yet.
+  const TEXTBOX_FAMILY: readonly CanonicalType[] = [
+    'text', 'textarea', 'integer', 'decimal', 'date', 'time', 'datetime', 'calculated',
+  ];
+  if (probe.declaredCanonical && TEXTBOX_FAMILY.includes(probe.declaredCanonical)) {
+    const matches = probe.declaredCanonical === canonical;
+    return {
+      matches,
+      evidence: matches
+        ? `${canonical}: type picker declares "${probe.declaredCanonical}"`
+        : `${canonical}: type picker declares "${probe.declaredCanonical}", not ${canonical}`,
+    };
+  }
+
+  // Wizard / empty-canvas choice: type picker already stores the canonical id
+  // (option value="radio") before any options exist on the canvas. Trust that
+  // declaration when the observed role has not materialised yet — otherwise
+  // FormCraft Orbit Set / Pick One never bind (live wizard v10: 8 fields).
+  if (
+    probe.declaredCanonical === canonical
+    && (canonical === 'radio' || canonical === 'single_select' || canonical === 'multi_select')
+    && (probe.observedRole === 'none' || probe.observedRole === 'generic')
+  ) {
+    return {
+      matches: true,
+      evidence: `${canonical}: type picker declares "${probe.declaredCanonical}" (canvas role unrealised)`,
+    };
+  }
+
   // Choice types
   if (canonical === 'single_select') {
     if (probe.observedRole === 'combobox' || probe.observedRole === 'listbox') {
       return { matches: true, evidence: `single_select: role=${probe.observedRole}, dropdown selection` };
     }
+    if (probe.declaredCanonical === 'single_select') {
+      return { matches: true, evidence: `single_select: type picker declares single_select` };
+    }
     return { matches: false, evidence: `single_select: expected combobox/listbox, got ${probe.observedRole}` };
   }
 
   if (canonical === 'multi_select') {
+    // Empty single-choice tiles declare radio/single_select in the type picker
+    // but have no canvas role until deepen. The vacuous hasOptionsEditor branch
+    // must not claim them as multi_select — that stole Beam Pick from radio
+    // after a prior probe left deepen without "+ Add Choice" (E2E v5 swapped).
+    if (
+      probe.declaredCanonical === 'radio'
+      || probe.declaredCanonical === 'single_select'
+    ) {
+      return {
+        matches: false,
+        evidence: `multi_select: type picker declares "${probe.declaredCanonical}"`,
+      };
+    }
     if (
       probe.observedRole === 'listbox' ||
       (probe.observedRole === 'checkbox' && probe.hasOptionsEditor) ||
@@ -330,6 +461,9 @@ export function classifyTypeFromProbe(
   if (canonical === 'radio') {
     if (probe.observedRole === 'radiogroup' || probe.observedRole === 'radio') {
       return { matches: true, evidence: `radio: role=${probe.observedRole}` };
+    }
+    if (probe.declaredCanonical === 'radio') {
+      return { matches: true, evidence: `radio: type picker declares radio` };
     }
     if (probe.hasOptionsEditor && probe.mutualExclusivity === 'single' && probe.observedRole !== 'combobox') {
       return { matches: true, evidence: `radio: choice control with single exclusivity` };

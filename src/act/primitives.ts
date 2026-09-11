@@ -237,10 +237,29 @@ export async function click(ctx: ActContext, handle: Handle, canRetry = true): P
   );
 }
 
+/** Contenteditable host (attribute or live isContentEditable). Mirrors
+ *  perceive/core — a11y-hostile platforms use role-less contenteditable divs
+ *  as textboxes; perceive maps them to role=textbox and ACT must write them. */
+function isContentEditableHost(el: Element): boolean {
+  const htmlEl = el as HTMLElement;
+  if (typeof htmlEl.isContentEditable === 'boolean' && htmlEl.isContentEditable) {
+    return true;
+  }
+  const attr = el.getAttribute('contenteditable');
+  if (attr === null) return false;
+  const v = attr.trim().toLowerCase();
+  return v === '' || v === 'true';
+}
+
 /**
- * Set a text value on an input/textarea at the given handle.
+ * Set a text value on an input/textarea OR a contenteditable host.
  * Writes are NOT retried (canRetry=false): a possibly-succeeded write
  * is handed to VERIFY, never double-submitted.
+ *
+ * Live env-hostile-a11y (Prism Wave Roster): visit Name/Window cells are
+ * contenteditable divs. Perceive sees them as textboxes, but setValue used
+ * to throw WriteFailedError on non-input tags → Snapshot Wave saved nothing
+ * (empty name) → visit-open escalated → empty GT.
  */
 export async function setValue(ctx: ActContext, handle: Handle, text: string): Promise<ActResult> {
   assertHandleInObservation(ctx.obs, handle, ctx.doc);
@@ -251,20 +270,40 @@ export async function setValue(ctx: ActContext, handle: Handle, text: string): P
       checkInteractable(el);
 
       const tag = el.tagName.toLowerCase();
+      const EventCtor = ctx.doc.defaultView?.Event ?? Event;
+
       if (tag === 'input' || tag === 'textarea') {
         const input = el as HTMLInputElement | HTMLTextAreaElement;
-              input.value = text;
-              // Dispatch input event so React/Vue listeners fire. Use doc.defaultView.Event
-              // to get the correct constructor in jsdom/browser contexts.
-              const EventCtor = ctx.doc.defaultView?.Event ?? Event;
-              input.dispatchEvent(new EventCtor('input', { bubbles: true }));
-              input.dispatchEvent(new EventCtor('change', { bubbles: true }));
+        input.value = text;
+        // Dispatch input event so React/Vue listeners fire. Use doc.defaultView.Event
+        // to get the correct constructor in jsdom/browser contexts.
+        input.dispatchEvent(new EventCtor('input', { bubbles: true }));
+        input.dispatchEvent(new EventCtor('change', { bubbles: true }));
         // Verify the value took.
         if (input.value !== text) {
           return { ok: false, error: `value did not stick: expected "${text}", got "${input.value}"`, retried: false };
         }
         return { ok: true, retried: false };
       }
+
+      if (isContentEditableHost(el)) {
+        // Replace contents (hostile cells wrap a .cell-text span; platforms
+        // read host.textContent on input). Avoid hardcoding class names.
+        while (el.firstChild) el.removeChild(el.firstChild);
+        el.appendChild(ctx.doc.createTextNode(text));
+        el.dispatchEvent(new EventCtor('input', { bubbles: true }));
+        el.dispatchEvent(new EventCtor('change', { bubbles: true }));
+        const got = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+        if (got !== text) {
+          return {
+            ok: false,
+            error: `contenteditable value did not stick: expected "${text}", got "${got}"`,
+            retried: false,
+          };
+        }
+        return { ok: true, retried: false };
+      }
+
       throw new WriteFailedError(handle, `setValue on non-input tag <${tag}>`);
     },
     { settle: ctx.settle, doc: ctx.doc, canRetry: false },

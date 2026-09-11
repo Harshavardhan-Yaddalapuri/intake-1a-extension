@@ -41,6 +41,7 @@ export type MicroStepKind =
   | 'type_refinement'
   | 'verify_range'
   | 'set_coded_values'
+  | 'set_formula'
   | 'set_required'
   | 'set_skip_logic';
 
@@ -51,6 +52,7 @@ export const MICRO_STEP_OP: Record<MicroStepKind, ContractOpId> = {
   set_range: 'field.set_range',
   type_refinement: 'field.add',
   set_coded_values: 'field.set_coded_values',
+  set_formula: 'field.set_formula',
   set_required: 'field.set_required',
   set_skip_logic: 'field.set_skip_logic',
   // Re-reads the range through the same binding that set it; the orchestrator
@@ -85,6 +87,10 @@ export function microOrder(field: IrField): MicroStepKind[] {
   const steps: MicroStepKind[] = ['add', 'set_label', 'type_refinement'];
   if (field.range) steps.push('set_range');
   if (field.options) steps.push('set_coded_values');
+  // Formula is a per-field write on calculated controls. It must run while the
+  // field is still selected (before set_required's verify), and only when the
+  // IR actually carries an expression — otherwise there is nothing to write.
+  if (field.formula) steps.push('set_formula');
   steps.push('set_required');
   if (field.range) steps.push('verify_range');
   return steps;
@@ -334,6 +340,8 @@ function describeStep(kind: MicroStepKind, field: IrField): string {
       return `confirm type "${field.canonical_type}" (post-range)`;
     case 'set_coded_values':
       return `set ${field.options!.length} coded value pairs`;
+    case 'set_formula':
+      return `set formula "${field.formula}"`;
     case 'set_required':
       return `set required=${field.required}`;
     case 'set_skip_logic':

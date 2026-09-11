@@ -1,0 +1,94 @@
+{
+  "platform": "env-swapped-controls",
+  "overall_match_pct": 94.47,
+  "total_expected": 1067,
+  "total_matched": 1008,
+  "criteria": {
+    "visits": {
+      "expected": 4,
+      "matched": 4,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "visit-windows": {
+      "expected": 4,
+      "matched": 4,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "forms": {
+      "expected": 28,
+      "matched": 28,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "repeating": {
+      "expected": 28,
+      "matched": 28,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "fields": {
+      "expected": 28,
+      "matched": 28,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "types": {
+      "expected": 195,
+      "matched": 195,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "required": {
+      "expected": 195,
+      "matched": 195,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "coded-pairs": {
+      "expected": 195,
+      "matched": 195,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "ranges": {
+      "expected": 195,
+      "matched": 136,
+      "match_pct": 69.74,
+      "mismatches": [
+        "field 'Height' range expected [100,250,cm], got [,,cm]",
+        "field 'Weight' range expected [30,300,kg], got [,,kg]",
+        "field 'Duration of Diagnosis' range expected [0,600,months], got [,,months]",
+        "field 'Dose' range expected [0,10000,mg], got [,,mg]",
+        "field 'Systolic Blood Pressure' range expected [60,250,mmHg], got [,,mmHg]",
+        "field 'Diastolic Blood Pressure' range expected [30,150,mmHg], got [,,mmHg]",
+        "field 'Heart Rate' range expected [30,220,bpm], got [,,bpm]",
+        "field 'Respiratory Rate' range expected [6,60,breaths/min], got [,,breaths/min]",
+        "field 'Body Temperature' range expected [34,42,C], got [,,C]",
+        "field 'Hemoglobin' range expected [3,25,g/dL], got [,,g/dL]",
+        "field 'Hematocrit' range expected [10,70,%], got [,,%]",
+        "field 'White Blood Cell Count' range expected [0.5,100,10^9/L], got [,,10^9/L]",
+        "field 'Platelet Count' range expected [10,1500,10^9/L], got [,,10^9/L]",
+        "field 'Study Day' range expected [-999,999,days], got [,,days]",
+        "field 'Systolic Blood Pressure' range expected [60,250,mmHg], got [,,mmHg]",
+        "field 'Diastolic Blood Pressure' range expected [30,150,mmHg], got [,,mmHg]",
+        "field 'Heart Rate' range expected [30,220,bpm], got [,,bpm]",
+        "field 'Respiratory Rate' range expected [6,60,breaths/min], got [,,breaths/min]",
+        "field 'Body Temperature' range expected [34,42,C], got [,,C]",
+        "field 'Ventricular Rate' range expected [20,250,bpm], got [,,bpm]"
+      ]
+    },
+    "skip-rules": {
+      "expected": 195,
+      "matched": 195,
+      "match_pct": 100.0,
+      "mismatches": []
+    }
+  },
+  "runtime": {
+    "escalations": "N/A",
+    "llm_calls": "N/A",
+    "human_decisions": "N/A"
+  }
+}

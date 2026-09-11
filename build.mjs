@@ -86,6 +86,8 @@ async function main() {
     ['src/shared/messages.ts', 'messages.mjs'],
     ['src/engine/tab-driver.ts', 'tab-driver.mjs'],
     ['src/engine/probe-runner.ts', 'probe-runner.mjs'],
+    ['src/engine/field-properties.ts', 'field-properties.mjs'],
+    ['src/engine/nav-gate.ts', 'nav-gate.mjs'],
     ['src/engine/orchestrator.ts', 'orchestrator.mjs'],
   ];
   for (const [entry, out] of nodeModules) {

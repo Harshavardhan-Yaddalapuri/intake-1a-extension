@@ -96,6 +96,7 @@ export type ContractOpId =
   | 'field.set_coded_values'
   | 'field.set_range'
   | 'field.set_skip_logic'
+  | 'field.set_formula'
   | 'ctx.commit'
   | 'ctx.is_committed'
   | 'ctx.discard';
@@ -116,6 +117,7 @@ export const CONTRACT_OPS: readonly ContractOpId[] = [
   'field.set_coded_values',
   'field.set_range',
   'field.set_skip_logic',
+  'field.set_formula',
   'ctx.commit',
   'ctx.is_committed',
   'ctx.discard',
@@ -226,6 +228,11 @@ export interface FieldSetSkipLogicArgs {
   action: string;
 }
 
+export interface FieldSetFormulaArgs {
+  op: 'field.set_formula';
+  formula: string;
+}
+
 export interface CtxCommitArgs {
   op: 'ctx.commit';
 }
@@ -254,6 +261,7 @@ export type ContractOpArgs =
   | FieldSetCodedValuesArgs
   | FieldSetRangeArgs
   | FieldSetSkipLogicArgs
+  | FieldSetFormulaArgs
   | CtxCommitArgs
   | CtxIsCommittedArgs
   | CtxDiscardArgs;
@@ -347,4 +355,23 @@ export interface IdempotencyKey {
 
 export function idempotencyKey(visit_id: string, form_id: string, field_id: string): string {
   return `${visit_id}\u0000${form_id}\u0000${field_id}`;
+}
+
+/**
+ * Per-linear-item key for run-state tracking.
+ *
+ * Most micro-steps share the field key so a verified field is a no-op on
+ * re-run. Form-end ops (skip logic) MUST keep a distinct key: they run after
+ * the field body is often already verified, and sharing the field key made
+ * every skip step a silent no-op (0/13 skip rules on Mock A).
+ */
+export function stepIdempotencyKey(item: {
+  visit_id: string;
+  form_id: string;
+  field_id: string;
+  kind: string;
+}): string {
+  const base = idempotencyKey(item.visit_id, item.form_id, item.field_id);
+  if (item.kind === 'set_skip_logic') return `${base}\u0000${item.kind}`;
+  return base;
 }

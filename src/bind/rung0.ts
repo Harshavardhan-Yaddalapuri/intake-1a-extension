@@ -28,6 +28,9 @@ import {
   largestControlCluster,
   rankCandidates,
   explainRanking,
+  matchesHintExact,
+  matchesHintLoose,
+  matchesHintWord,
   type RankedCandidate,
 } from './ranking';
 
@@ -55,9 +58,18 @@ export function findByRole(
   for (const el of obs.elements) {
     if (el.role !== role) continue;
     if (nameFilter) {
+      // Accessible name first. Hostile designers often leave `for=` pointing at
+      // a missing id (Required/Hidden), so the checkbox name is empty while
+      // groupText still carries the sibling label — accept that as a match
+      // rather than silently skipping field.set_required.
       const name = el.name.toLowerCase();
-      if (nameFilter.contains && !name.includes(nameFilter.contains.toLowerCase())) continue;
-      if (nameFilter.equals && name !== nameFilter.equals.toLowerCase()) continue;
+      const group = (el.groupText ?? '').toLowerCase();
+      const haystack = name || group;
+      if (nameFilter.contains && !haystack.includes(nameFilter.contains.toLowerCase())) continue;
+      if (nameFilter.equals) {
+        const eq = nameFilter.equals.toLowerCase();
+        if (name !== eq && group !== eq) continue;
+      }
     }
     // Role match with no name constraint: tentative.
     // Role match with name constraint: structural if name also matches.
@@ -65,7 +77,9 @@ export function findByRole(
     let evidence = `role=${el.role}`;
     if (nameFilter) {
       confidence = 'structural';
-      evidence += `, name~="${el.name}"`;
+      evidence += el.name
+        ? `, name~="${el.name}"`
+        : `, groupText~="${el.groupText ?? ''}"`;
     } else {
       evidence += `, name="${el.name}"`;
     }
@@ -407,20 +421,37 @@ export function rankAscendCandidates(
 
   // Structural exclusion: the palette is a cluster of sibling controls.
   // Removing it by shape is legitimate; removing it by name would not be.
+  //
+  // Keep breadcrumb/back controls even when they sit in the largest cluster.
+  // On a visit detail screen that cluster is toolbar chrome (Phases / Sites /
+  // <- Back / + New Record Sheet); excluding Back left only Modify/Go Live/
+  // Remove, which re-entered the builder and never reached the visit list
+  // (Hostile E2E v5 Screening "could not open this visit" after Demographics).
   const cluster = largestControlCluster(pool);
   const excluded = new Set((cluster?.members ?? []).map((e) => e.handle));
-  const safe = pool.filter((e) => !excluded.has(e.handle));
+  const isBreadcrumb = (name: string) => {
+    const n = normaliseText(name);
+    return matchesHintLoose(n, 'ascend') || n.startsWith('<-') || n.startsWith('←');
+  };
+  const safe = pool.filter((e) => !excluded.has(e.handle) || isBreadcrumb(e.name));
   if (safe.length === 0) return [];
 
   const known = contextNames.map(normaliseText).filter(Boolean);
 
   return rankCandidates(safe, { hint: 'visit_list' })
-    .map((r) => ({
-      el: r.el,
-      score: r.score + (known.some((n) => normaliseText(r.el.name).includes(n))
-        ? ASCEND_PARENT_NAME_BONUS
-        : 0),
-    }))
+    .map((r) => {
+      let score = r.score;
+      const name = normaliseText(r.el.name);
+      if (known.some((n) => name.includes(n))) score += ASCEND_PARENT_NAME_BONUS;
+      // Breadcrumb / back controls actually move; inert tabs named "Phases"
+      // match visit_list lexically and do nothing (env-rosetta toolbar).
+      if (matchesHintLoose(name, 'ascend') || name.startsWith('<-') || name.startsWith('←')) {
+        score += ASCEND_PARENT_NAME_BONUS;
+      } else if (matchesHintExact(name, 'chrome')) {
+        score -= ASCEND_PARENT_NAME_BONUS;
+      }
+      return { el: r.el, score };
+    })
     .sort((a, b) => b.score - a.score)
     .map((x) => x.el);
 }
@@ -434,7 +465,57 @@ export function rankAscendCandidates(
  * exists there are no such names, so the control that pre-flight bound to
  * `visit.create` is accepted as the second witness: it is present on the visit
  * list and nowhere else. Used here as evidence, not as an action.
+ *
+ * A create-control witness must look like a create action, not like chrome.
+ *
+ * Live on Zephyr (env-rosetta): visit.create bound to the inert toolbar tab
+ * "Phases" (tied with "+ New Phase" on a single hint hit). "Phases" is present
+ * on every screen, so treating it as proof of the visit list made
+ * atVisitList always true, createVisit clicked a no-op, and no visits appeared.
  */
+function looksLikeCreateControl(name: string): boolean {
+  const n = normaliseText(name);
+  if (!n) return false;
+  if (n.includes('+')) return true;
+  return /(?:^|\s)(add|new|create)(?:\s|$)/.test(n);
+}
+
+/**
+ * Visit-list create witness — must look like creating a VISIT/phase/cycle,
+ * not a form/page/element. "+ New Record Sheet" / "+ Page" / "+ New Instrument"
+ * live on visit detail / designer; treating them as visit.create made
+ * atVisitList true on those screens, so navigateToVisit skipped the climb,
+ * found no Screening row, and false-gated "could not open this visit"
+ * (Hostile E2E rosetta after Demographics).
+ */
+function looksLikeVisitCreateControl(name: string): boolean {
+  if (!looksLikeCreateControl(name)) return false;
+  const n = normaliseText(name);
+  // Form / document create on the visit detail (incl. a11y-hostile "Survey").
+  if (/(?:^|\s)(form|sheet|record|instrument|document|crf|source|survey|questionnaire)(?:\s|$)/.test(n)) {
+    return false;
+  }
+  // Designer page chrome.
+  if (/(?:^|\s)(page|element|field|node|brick|tile)(?:\s|$)/.test(n)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Form-create witness on a visit detail (not the visit list).
+ * Includes degrade-path nouns (survey / questionnaire) used when platforms
+ * rename "form" without ARIA names — names still come from text content.
+ */
+export function looksLikeFormCreateControl(name: string): boolean {
+  const n = normaliseText(name);
+  if (!n) return false;
+  if (!(n.includes('+') || /(?:^|\s)(add|new|create)(?:\s|$)/.test(n))) return false;
+  // Visit/phase/wave create belongs to the list, not the detail.
+  if (/(?:^|\s)(visit|phase|cycle|timepoint|event|wave)(?:\s|$)/.test(n)) return false;
+  return /(?:^|\s)(form|sheet|record|instrument|document|crf|source|survey|questionnaire)(?:\s|$)/.test(n);
+}
+
 export function atVisitList(
   obs: Observation,
   visitNames: readonly string[],
@@ -448,7 +529,48 @@ export function atVisitList(
   }
 
   const create = createControlName ? normaliseText(createControlName) : '';
-  return create !== '' && actionable.some((e) => normaliseText(e.name) === create);
+  if (!create || !looksLikeVisitCreateControl(createControlName!)) return false;
+  return actionable.some((e) => normaliseText(e.name) === create);
+}
+
+/**
+ * Positive read-back for "am I inside a visit's form list?"
+ *
+ * Negating atVisitList is not enough on hostile chrome: inert tabs named
+ * "Phases" do not move, and a failed open left the run blocked on Screening
+ * even after the Phases/create-control fix. A visit detail screen exposes a
+ * form-create control ("+ New Record Sheet", "+ New Instrument") that the
+ * visit list does not.
+ */
+export function atVisitDetail(
+  obs: Observation,
+  visitName?: string,
+  knownVisitNames: readonly string[] = [],
+): boolean {
+  const actionable = enumerateActionable(obs);
+  const hasFormCreate = actionable.some((e) => looksLikeFormCreateControl(e.name));
+  if (!hasFormCreate) return false;
+  if (!visitName) return true;
+
+  // Prefer seeing the visit name (heading / breadcrumb / groupText). Hostile
+  // a11y trees sometimes omit it while still exposing form-create. Requiring
+  // the name then made navigateToVisit treat an already-open detail as "not
+  // open", climb via "<- Back", and false-gate re-open.
+  const target = normaliseText(visitName);
+  if (!target) return true;
+  const blob = (e: { name: string; groupText?: string }) =>
+    normaliseText(`${e.name} ${e.groupText ?? ''}`);
+  if (obs.elements.some((e) => blob(e).includes(target))) return true;
+
+  // Name absent: still accept UNLESS another known visit is clearly indicated
+  // (avoids claiming Screening while standing on Baseline's form list).
+  const others = knownVisitNames
+    .map(normaliseText)
+    .filter((n) => n && n !== target);
+  if (others.some((o) => obs.elements.some((e) => blob(e).includes(o)))) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -819,34 +941,29 @@ export function bindFieldSetRange(obs: Observation): BindingRecord | null {
 
 /**
  * Bind field.set_skip_logic: find the visibility/conditional control and
- * the trigger/condition inputs.
+ * the trigger/condition inputs via ranking (no English name gates).
  */
 export function bindFieldSetSkipLogic(obs: Observation): BindingRecord | null {
-  const visCandidates = findByRole(obs, 'combobox', { contains: 'visib' })
-    .concat(findByRole(obs, 'listbox', { contains: 'visib' }))
-    .concat(findByRole(obs, 'combobox', { contains: 'conditional' }))
-    .concat(findByRole(obs, 'combobox', { contains: 'when' }));
-
-  if (visCandidates.length === 0) return null;
+  const modePool = enumerateByRoles(obs, ['combobox', 'listbox']);
+  const mode = rankCandidates(modePool, { hint: 'visibility' })[0];
+  if (!mode) return null;
 
   const recipe: RecipeStep[] = [
-    { step: 'select_option', evidence_role: visCandidates[0].el.role, evidence_name: visCandidates[0].el.name, handle_kind: 'snapshot-id', from_list_exposed: true },
+    { step: 'select_option', evidence_role: mode.el.role, evidence_name: mode.el.name, handle_kind: 'snapshot-id', from_list_exposed: true },
   ];
-  const evidence = [visCandidates[0].evidence];
+  const evidence = [explainRanking(mode, modePool.length)];
 
-  // Also look for a trigger field selector and a value input.
-  const whenSelects = findByRole(obs, 'combobox', { contains: 'when' })
-    .concat(findByRole(obs, 'listbox', { contains: 'when' }));
-  const valueInputs = findByRole(obs, 'textbox', { contains: 'equal' })
-    .concat(findByRole(obs, 'textbox', { contains: 'value' }));
-
-  if (whenSelects.length > 0) {
-    recipe.push({ step: 'select_option', evidence_role: whenSelects[0].el.role, evidence_name: whenSelects[0].el.name, handle_kind: 'snapshot-id', from_list_exposed: true });
-    evidence.push(whenSelects[0].evidence);
+  const when = rankCandidates(modePool, { hint: 'skip_when', demote: ['visibility'] })[0];
+  if (when && when.el.handle !== mode.el.handle) {
+    recipe.push({ step: 'select_option', evidence_role: when.el.role, evidence_name: when.el.name, handle_kind: 'snapshot-id', from_list_exposed: true });
+    evidence.push(explainRanking(when, modePool.length));
   }
-  if (valueInputs.length > 0) {
-    recipe.push({ step: 'set_value', evidence_role: 'textbox', evidence_name: valueInputs[0].el.name, handle_kind: 'snapshot-id', value_from: 'ir' });
-    evidence.push(valueInputs[0].evidence);
+
+  const valuePool = enumerateByRoles(obs, ['textbox', 'searchbox']);
+  const value = rankCandidates(valuePool, { hint: 'skip_value' })[0];
+  if (value) {
+    recipe.push({ step: 'set_value', evidence_role: value.el.role, evidence_name: value.el.name, handle_kind: 'snapshot-id', value_from: 'ir' });
+    evidence.push(explainRanking(value, valuePool.length));
   }
 
   return makeBinding(
@@ -855,7 +972,71 @@ export function bindFieldSetSkipLogic(obs: Observation): BindingRecord | null {
     recipe,
     'conditional visibility is set on the element',
     evidence,
-    visCandidates[0].confidence,
+    mode.score > 0 ? 'hypothesis' : 'tentative',
+  );
+}
+
+/**
+ * Bind field.set_formula: locate the formula/expression textbox.
+ */
+export function bindFieldSetFormula(obs: Observation): BindingRecord | null {
+  const pool = enumerateByRoles(obs, ['textbox', 'searchbox']);
+  if (pool.length === 0) return null;
+  const best = rankCandidates(pool, { hint: 'formula' })[0];
+  if (!best) return null;
+
+  return makeBinding(
+    'field.set_formula',
+    0,
+    [{ step: 'set_value', evidence_role: best.el.role, evidence_name: best.el.name, handle_kind: 'snapshot-id', value_from: 'ir' }],
+    'the calculated formula/expression is set on the element',
+    [explainRanking(best, pool.length)],
+    best.score > 0 ? 'hypothesis' : 'tentative',
+  );
+}
+
+
+/**
+ * The control that appends a coded-value row ("+ Add Value"), not the bulk
+ * paste apply button.
+ *
+ * `contains: 'add'` alone matches "Apply Pasted Values" because "pasted"
+ * contains the substring "add". That button REPLACES the list when the paste
+ * box is non-empty and is a no-op when empty — either way it is not the
+ * row-adding control. Require a word-boundary `add` and exclude paste/apply.
+ */
+export function findAddCodedValueControl(obs: Observation): ObservationElement | undefined {
+  return findByRole(obs, 'button', { contains: 'add' })
+    .map((c) => c.el)
+    .find((el) => {
+      const n = el.name.toLowerCase();
+      if (!/\badd\b/.test(n)) return false;
+      // Rosetta: "+ Add Value"; Nexus: "+ Add Choice". Either appends a row.
+      if (!(n.includes('value') || n.includes('choice') || n.includes('option'))) return false;
+      if (n.includes('paste') || n.includes('apply')) return false;
+      return true;
+    });
+}
+
+/** True when a button removes one coded-value / choice row.
+ *
+ *  Must NOT match field-level delete ("Delete Element" / "Delete Node"): live
+ *  Rosetta v10 clicked that (last delete_element match in document order)
+ *  during coded-value nudge/prune and wiped every radio/single/multi field.
+ */
+export function isCodedValueRemoveControl(name: string): boolean {
+  const n = name.trim().toLowerCase();
+  if (!n) return false;
+  // Hostile envs label the control "x" / "×" / "✕" with no remove word.
+  if (n === 'x' || n === '×' || n === '✕' || n === '✖' || n === '⨯') return true;
+  // Exact "remove" only (Nexus row chrome). Multi-word names are field/form deletes.
+  return n === 'remove';
+}
+
+/** Last remove control in document order — the row just appended by nudge. */
+export function findCodedValueRemoveControls(obs: Observation): ObservationElement[] {
+  return obs.elements.filter(
+    (e) => e.role === 'button' && isCodedValueRemoveControl(e.name),
   );
 }
 
@@ -875,11 +1056,11 @@ export function bindFieldSetCodedValues(obs: Observation): BindingRecord | null 
     (c) => !codeInputs.some((code) => code.el.handle === c.el.handle),
   );
 
-  // Also look for an "add value" button.
-  const addValueBtns = findByRole(obs, 'button', { contains: 'add' }).filter(
-    (b) => b.el.name.toLowerCase().includes('value'),
-  );
-  void addValueBtns;
+  // Also look for an "add value" button (not "Apply Pasted Values").
+  const addValueEl = findAddCodedValueControl(obs);
+  const addValueBtns = addValueEl
+    ? [{ el: addValueEl, evidence: `add value button: ${addValueEl.name}`, confidence: 'structural' as const }]
+    : [];
 
   // Or a paste textarea + apply button.
   const pasteTextareas = obs.elements.filter(
@@ -966,10 +1147,14 @@ export function rankCommitCandidates(obs: Observation): RankedCandidate[] {
   // reusable name ("Save As Template") ties with the real save control on the
   // word "save" alone, and DOM order then decides -- which on the supplied
   // mock put the decoy first and silently lost an entire form's work.
+  //
+  // Bare "Done" is excluded: FormCraft's wizard terminal Done navigates to the
+  // visit without commitWorking. commit hints list "done", so ranking it and
+  // clicking it discarded working fields (live wizard v13: 189→19).
   return rankCandidates(enumerateActionable(obs), {
     hint: 'commit',
     demote: ['template', 'discard'],
-  });
+  }).filter((r) => (r.el.name || '').trim().toLowerCase() !== 'done');
 }
 
 /**
@@ -1063,6 +1248,8 @@ export function bindAllRung0(obs: Observation): Partial<Record<ContractOpId, Bin
   if (r10) results['field.set_range'] = r10;
   const r11 = bindFieldSetSkipLogic(obs);
   if (r11) results['field.set_skip_logic'] = r11;
+  const r11b = bindFieldSetFormula(obs);
+  if (r11b) results['field.set_formula'] = r11b;
   const r12 = bindFieldSetCodedValues(obs);
   if (r12) results['field.set_coded_values'] = r12;
   const r13 = bindCtxCommit(obs);

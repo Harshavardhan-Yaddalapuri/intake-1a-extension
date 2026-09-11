@@ -13,7 +13,8 @@
  *   - Navigation is IMPLICIT in the plan: the plan is ordered visit -> form ->
  *     field, and the orchestrator navigates when the visit/form context changes.
  *   - Checkpoint after every verified item for resume on page reload.
- *   - The orchestrator PAUSES on escalation and waits for human input.
+ *   - Blocking escalations pause for human input; verifying/parked findings
+ *     never halt the build (reviewed in one sitting at the end).
  *   - Pre-flight runs discovery probes before the main execution loop.
  */
 
@@ -36,7 +37,8 @@ import type {
   ContractOpId,
   RecipeStep,
 } from '../shared/contract';
-import { idempotencyKey, CANONICAL_TYPES } from '../shared/contract';
+import { idempotencyKey, stepIdempotencyKey, CANONICAL_TYPES } from '../shared/contract';
+import { FieldPropertyWrites } from './field-properties';
 import type {
   EscalationItem,
   RunProgress,
@@ -45,7 +47,7 @@ import type {
   HumanDecision,
 } from '../shared/messages';
 import type { IntentRecord, VerdictResult } from '../verify/verify';
-import { compareIntent, checkFirst } from '../verify/verify';
+import { compareIntent, checkFirst, resolveByName } from '../verify/verify';
 import {
   type RunState,
   type ItemRecord,
@@ -58,20 +60,25 @@ import {
   chromeStorageAdapter,
 } from './state-machine';
 import { TabDriver } from './tab-driver';
+import { navGateAllowsContinue, navGateShouldRetryOpen } from './nav-gate';
 import {
   bindAllRung0,
   bindFieldAdd,
   findByRole,
   findByNameOnly,
+  findAddCodedValueControl,
+  findCodedValueRemoveControls,
   expectedRolesForType,
 } from '../bind/rung0';
-import { ProbeRunner } from './probe-runner';
+import { ProbeRunner, findWizardAdvanceControl, findWizardBackControl } from './probe-runner';
 import { analyzeCommit, sameSurface } from '../bind/rung1';
 import {
   enumerateActionable,
   enumerateActions,
   enumerateByRoles,
   rankCandidates,
+  matchesHintWord,
+  matchesHintExact,
 } from '../bind/ranking';
 import {
   rankCommitCandidates,
@@ -81,6 +88,7 @@ import {
   surfaceShowsForm,
   rankAscendCandidates,
   atVisitList,
+  atVisitDetail,
 } from '../bind/rung0';
 import { Journal, type IrSource } from './journal';
 import { rankWithLlm } from '../bind/rung2';
@@ -114,6 +122,21 @@ export interface OrchestratorCallbacks {
   /** Called at the end of the run with the parked (non-blocking) escalations,
    *  to be cleared in one review session. */
   onParkedReview?: (items: EscalationItem[]) => void;
+}
+
+
+/**
+ * Whether an escalation should halt the orchestrator.
+ *
+ * Verifying findings mean the field is already in the study ("Built — needs a
+ * look"). They must never block: hostile v7 parked the schedule on Sex at Birth
+ * after Demographics was clean and later visits never built.
+ */
+export function escalationIsBlocking(
+  phase: 'binding' | 'acting' | 'verifying',
+  blocking: boolean,
+): boolean {
+  return phase === 'verifying' ? false : blocking;
 }
 
 export class Orchestrator {
@@ -154,8 +177,12 @@ export class Orchestrator {
    *  set_coded_values has run. See adjudicateType. */
   private deferredTypeProbe: Map<CanonicalType, Observation> = new Map();
 
-  /** Escalation queue: items waiting for human input. */
-  private escalationQueue: Map<string, { resolve: (d: HumanDecision) => void }> = new Map();
+  /** Escalation queue: blocking items waiting for human input.
+   *  Stores the full EscalationItem so reconnect does not invent phase/blocking. */
+  private escalationQueue: Map<string, {
+    item: EscalationItem;
+    resolve: (d: HumanDecision) => void;
+  }> = new Map();
 
   /** Pause promise: resolves when the user resumes. */
   private pauseResolve: (() => void) | null = null;
@@ -175,6 +202,10 @@ export class Orchestrator {
   private deepReconcileAvailable = false;
   /** Non-blocking escalations, reviewed in one sitting at the end. */
   private parked: EscalationItem[] = [];
+  /** How many fields carried an attribute this platform states nowhere, by
+   *  attribute. Entered, but with no surface to read it back from -- said once
+   *  for the run rather than parked as a finding on every field that has one. */
+  private unobservable: Map<string, number> = new Map();
   /** One decision per group settles every item sharing that group key. */
   private groupDecisions: Map<string, HumanDecision> = new Map();
 
@@ -210,10 +241,11 @@ export class Orchestrator {
       }
     }
 
-    // Build run state with all idempotency keys.
+    // Build run state with all step keys. Skip-logic steps get a distinct key
+    // so they still run after the field body is verified (see stepIdempotencyKey).
     const keys: string[] = [];
     for (const item of this.linearItems) {
-      const key = idempotencyKey(item.visit_id, item.form_id, item.field_id);
+      const key = stepIdempotencyKey(item);
       if (!keys.includes(key)) {
         keys.push(key);
       }
@@ -252,6 +284,22 @@ export class Orchestrator {
     // Phase 2: Execution loop.
     this.phase = 'executing';
     await this.executePlan();
+
+    // Say what could not be re-read, once, before the pile is reviewed.
+    //
+    // These are not findings and must never become queue items: a field whose
+    // bounds this designer keeps in its own state and never renders is built
+    // and correct. But dropping the check silently would be its own dishonesty
+    // -- the reviewer is entitled to know which claims the platform let us
+    // confirm and which it did not.
+    for (const [attr, n] of this.unobservable) {
+      this.journal.note(
+        'verify',
+        `${n} field(s) carry ${attr} that this platform states nowhere on the ` +
+        `form: they were entered, and there is no surface to read them back ` +
+        `from. Not re-checked, and not reported as findings.`,
+      );
+    }
 
     // Phase 3: clear the parked pile.
     //
@@ -292,6 +340,7 @@ export class Orchestrator {
   /** Resolve a human escalation. */
   resolveEscalation(key: string, decision: HumanDecision): void {
     const pending = this.escalationQueue.get(key);
+    const fromQueue = pending?.item;
     if (pending) {
       pending.resolve(decision);
       this.escalationQueue.delete(key);
@@ -300,13 +349,12 @@ export class Orchestrator {
     // A decision on a grouped escalation settles every item in that group.
     // 13 canonical types means at most 13 type decisions, never 195.
     const resolved =
-      this.parked.find((p) => p.key === key) ?? null;
+      fromQueue ?? this.parked.find((p) => p.key === key) ?? null;
     const groupKey = resolved?.groupKey;
     if (groupKey) {
       this.groupDecisions.set(groupKey, decision);
       for (const [otherKey, waiter] of [...this.escalationQueue]) {
-        const other = this.parked.find((p) => p.key === otherKey);
-        if (other?.groupKey === groupKey) {
+        if (waiter.item.groupKey === groupKey) {
           waiter.resolve(decision);
           this.escalationQueue.delete(otherKey);
         }
@@ -320,29 +368,11 @@ export class Orchestrator {
 
   /** Get the escalation queue for side panel reconnect. */
   getEscalationQueue(): EscalationItem[] {
-    const items: EscalationItem[] = [];
-    for (const [key] of this.escalationQueue) {
-      const item = this.runState.items[key];
-      if (item) {
-        const field = this.irFieldMap.get(item.field_id);
-        const form = this.irFormMap.get(item.form_id);
-        const visit = this.irVisitMap.get(item.visit_id);
-        items.push({
-          key,
-          fieldLabel: field?.label ?? item.field_id,
-          formName: form?.name ?? item.form_id,
-          visitName: visit?.name ?? item.visit_id,
-          canonicalType: (field?.canonical_type ?? 'text') as CanonicalType,
-          reason: item.escalation_reason ?? 'unknown',
-          // Reconstructed from the live queue: anything still waiting on a
-          // human by definition blocked the run.
-          blocking: true,
-          evidence: [],
-          phase: 'verifying',
-        });
-      }
-    }
-    return items;
+    // Return the items we stored when we opened the gate. Do NOT reconstruct
+    // with phase:'verifying' / blocking:true — that turned binding and visit
+    // gates into "Built — needs a look" after a worker blip, and dropped
+    // visit-nav / form-open waiters that have no runState.items entry.
+    return [...this.escalationQueue.values()].map((w) => w.item);
   }
 
   // -------------------------------------------------------------------------
@@ -493,7 +523,7 @@ export class Orchestrator {
     let invalidated = false;
 
     for (const item of this.linearItems) {
-      const key = idempotencyKey(item.visit_id, item.form_id, item.field_id);
+      const key = stepIdempotencyKey(item);
       const record = this.runState.items[key];
       if (!record || record.state === 'pending') continue;
 
@@ -549,7 +579,7 @@ export class Orchestrator {
       }
 
       const item = this.linearItems[i];
-      const itemKey = idempotencyKey(item.visit_id, item.form_id, item.field_id);
+      const itemKey = stepIdempotencyKey(item);
       const record = this.runState.items[itemKey];
 
       // Skip already-verified items (idempotency).
@@ -559,11 +589,19 @@ export class Orchestrator {
         continue;
       }
 
-      // Skip escalated items (human will resolve later).
+      // Skip escalated items (human will resolve later) — except skip-logic /
+      // formula property writes. Reconcile does not observe those properties, and
+      // a prior escalate (e.g. wrong visibility option label) must not permanently
+      // suppress retries after a code fix on an otherwise complete study.
       if (record && record.state === 'escalated') {
-        this.runState.cursor = i + 1;
-        this.emitProgress(i);
-        continue;
+        if (item.kind === 'set_skip_logic' || item.kind === 'set_formula') {
+          record.state = 'pending';
+          record.last_verdict = undefined;
+        } else {
+          this.runState.cursor = i + 1;
+          this.emitProgress(i);
+          continue;
+        }
       }
 
       // If form context is changing, commit the current form first!
@@ -643,7 +681,15 @@ export class Orchestrator {
     const reconciled = this.formReconcile.get(item.form_id);
     const decision = reconciled?.decisions.find((d) => d.field_id === item.field_id);
 
-    if (decision?.action === 'adopt') {
+    // Reconcile adopts on label/type/required/range/codes only — it never looks
+    // at skip_logic or formula. Adopting those micro-steps marks them verified
+    // without writing, which is exactly how live Mock A stayed at 0/13 skip
+    // rules after structure+formulas were already present.
+    if (
+      decision?.action === 'adopt' &&
+      item.kind !== 'set_skip_logic' &&
+      item.kind !== 'set_formula'
+    ) {
       const record = this.runState.items[itemKey];
       if (record) {
         record.state = 'verified';
@@ -685,6 +731,7 @@ export class Orchestrator {
       coded_pairs: field.options,
       range_units: field.range,
       skip_rules: field.skip_logic ? [field.skip_logic] : undefined,
+      formula: field.formula,
     };
 
     // Determine what to do based on the micro-step kind.
@@ -708,6 +755,9 @@ export class Orchestrator {
         break;
       case 'set_coded_values':
         await this.executeFieldSetCodedValues(item, itemKey, field);
+        break;
+      case 'set_formula':
+        await this.executeFieldSetFormula(item, itemKey, field);
         break;
       case 'set_required':
         await this.executeFieldSetRequired(item, itemKey, field, intent);
@@ -734,7 +784,7 @@ export class Orchestrator {
     intent: IntentRecord,
   ): Promise<void> {
     const { observation } = await this.driver.perceiveAfterSettle(200);
-    const verdict = compareIntent(observation, intent);
+    const verdict = this.countUnobservable(compareIntent(observation, intent));
 
     if (verdict.verdict === 'VERIFIED') {
       await this.markVerified(itemKey, {
@@ -745,21 +795,12 @@ export class Orchestrator {
       return;
     }
 
-    await this.escalateItem(itemKey, 'verifying', {
-      key: itemKey,
-      fieldLabel: item.label,
-      formName: item.form_name,
-      visitName: item.visit_name,
-      canonicalType: item.canonical_type,
-      reason: verdict.reason,
-      suspectedTrap:
-        verdict.suspected_trap ??
-        'the range was set earlier but is absent now; the platform may have ' +
-        'discarded it when the control type was settled',
-      evidence: [verdict.reason],
-      verdict,
-      phase: 'verifying',
-    }, /* blocking */ false);
+    // A miss here is not yet a finding, for the same reason it is not one on
+    // the main path: this canvas re-renders only when the form's SHAPE changes,
+    // so a label typed a moment ago is still absent from it. Escalating here
+    // reported the field twice -- once now and once after the commit -- and the
+    // second look was the one that could see anything. Defer to it.
+    this.pendingVerification.push({ itemKey, item, field, intent });
   }
 
   // -------------------------------------------------------------------------
@@ -809,7 +850,8 @@ export class Orchestrator {
         typeof stored?.openRouterApiKey === 'string' ? stored.openRouterApiKey : null;
 
       if (apiKey) {
-        const { observation: paletteObs } = await this.driver.perceive();
+        let { observation: paletteObs } = await this.driver.perceive();
+        paletteObs = await this.probeRunner.ensureFieldPaletteOpen(paletteObs);
         const pool = rankCandidates(enumerateActionable(paletteObs), { hint: 'palette' });
         const llmRanked = await rankWithLlm(field.canonical_type, pool, {
           apiKey,
@@ -885,13 +927,30 @@ export class Orchestrator {
         ],
         phase: 'binding',
       }, /* blocking */ true);
-      return;
+      // Human Change-type installs a binding; continue and place rather than
+      // abandoning the field (live: override collapsed the card and left
+      // Demographics empty while the run looked stopped).
+      typeBinding = this.typeBindings[field.canonical_type];
+      if (!typeBinding) return;
+      const rec = this.runState.items[itemKey];
+      if (rec && rec.state === 'escalated') {
+        rec.state = 'pending';
+        rec.rebind_count = 0;
+        delete rec.escalation_reason;
+      }
     }
 
     // Execute the binding recipe (click the palette button).
     await applyTransition(this.adapter, this.runState, itemKey, 'begin_binding');
     await applyTransition(this.adapter, this.runState, itemKey, 'bound');
     await applyTransition(this.adapter, this.runState, itemKey, 'begin_acting');
+
+    // Modal libraries (FormCraft "+ Add Element") close after each place —
+    // reopen so the type tile is resolvable by name.
+    {
+      const { observation: beforePlace } = await this.driver.perceive();
+      await this.probeRunner.ensureFieldPaletteOpen(beforePlace);
+    }
 
     const actOk = await this.executeRecipe(typeBinding.recipe, field);
     const actEvent: ItemEvent = actOk ? 'act_done' : 'act_failed';
@@ -977,14 +1036,30 @@ export class Orchestrator {
   ): Promise<void> {
     if (!field.range) return;
 
-    const { observation } = await this.driver.perceive();
+    let { observation } = await this.driver.perceive();
 
-    // Find min/max/units inputs.
-    const minInputs = findByRole(observation, 'textbox', { contains: 'min' })
-      .concat(findByRole(observation, 'spinbutton', { contains: 'min' }));
-    const maxInputs = findByRole(observation, 'textbox', { contains: 'max' })
-      .concat(findByRole(observation, 'spinbutton', { contains: 'max' }));
-    const unitInputs = findByRole(observation, 'textbox', { contains: 'unit' });
+    const collectRangeInputs = (obs: typeof observation) => {
+      const minInputs = findByRole(obs, 'textbox', { contains: 'min' })
+        .concat(findByRole(obs, 'spinbutton', { contains: 'min' }));
+      const maxInputs = findByRole(obs, 'textbox', { contains: 'max' })
+        .concat(findByRole(obs, 'spinbutton', { contains: 'max' }));
+      const unitInputs = findByRole(obs, 'textbox', { contains: 'unit' });
+      return { minInputs, maxInputs, unitInputs };
+    };
+
+    let { minInputs, maxInputs, unitInputs } = collectRangeInputs(observation);
+    // Wizard builders hide range on a later step — advance until min/max show.
+    // Cap at 5 (label→type→required→options→range). Stop when Next disappears
+    // (Done on the final step) so we do not leave the surface via commit decoys.
+    for (let step = 0; step < 5 && minInputs.length === 0 && maxInputs.length === 0; step += 1) {
+      const advance = findWizardAdvanceControl(observation);
+      if (!advance) break;
+      const clicked = await this.driver.click(advance.handle);
+      if (!clicked.ok) break;
+      await this.sleep(180);
+      ({ observation } = await this.driver.perceiveAfterSettle(150));
+      ({ minInputs, maxInputs, unitInputs } = collectRangeInputs(observation));
+    }
 
     if (minInputs.length > 0) {
       await this.driver.setValue(minInputs[0].el.handle, String(field.range.min));
@@ -1138,10 +1213,6 @@ export class Orchestrator {
         .filter((c) => !codes.some((ci) => ci.el.handle === c.el.handle));
       return labels.slice(Math.max(0, labels.length - codeCount));
     };
-    const addRowControlOf = (o: Observation) =>
-      findByRole(o, 'button', { contains: 'add' })
-        .filter((b) => b.el.name.toLowerCase().includes('value'))[0]?.el;
-
     // An editor that renders one row per existing value offers NO code/label
     // inputs until a row exists, so the row-adding control has to be pressed
     // before there is anything to type into. The previous order -- type, then
@@ -1159,7 +1230,7 @@ export class Orchestrator {
       let codes = codesOf(observation);
 
       if (codes.length <= i) {
-        const add = addRowControlOf(observation);
+        const add = findAddCodedValueControl(observation);
         if (!add) break;
         await this.driver.click(add.handle);
         await this.sleep(200);
@@ -1173,6 +1244,15 @@ export class Orchestrator {
       if (rowLabels[i]) await this.driver.setValue(rowLabels[i].el.handle, pair.label);
     }
 
+    // Platforms that keep option inputs uncontrolled (draft text excluded from
+    // the layout key) do not re-render the canvas after the last label is
+    // typed. Live, Race's fifth checkbox stayed aria-labelled "Race: " while
+    // the Options panel already held OT/Other — VERIFY then saw a blank option
+    // and parked every multi_select. Nudge a shape-changing add+remove so the
+    // canvas catches up before deferred type read-back / set_required.
+    await this.nudgeCodedValuesCanvasRefresh(codesOf);
+    await this.pruneEmptyCodedValueRows(codesOf, field.options.length);
+
     // The options now exist, so the control finally shows what it is. Settle
     // any read-back this type deferred at add time.
     const deferredFrom = this.deferredTypeProbe.get(field.canonical_type);
@@ -1185,6 +1265,61 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * Force a layout-key change after coded-value text writes so the canvas
+   * re-renders option labels that live only in platform state until then.
+   */
+  private async nudgeCodedValuesCanvasRefresh(
+    codesOf: (o: Observation) => ReturnType<typeof findByRole>,
+  ): Promise<void> {
+    let { observation } = await this.driver.perceive();
+    const before = codesOf(observation).length;
+    const add = findAddCodedValueControl(observation);
+    if (!add) return;
+    await this.driver.click(add.handle);
+    await this.sleep(150);
+    ({ observation } = await this.driver.perceive());
+    if (codesOf(observation).length <= before) return;
+    // Rosetta/Nexus label the row delete control "x", not "×" or "Remove".
+    // Missing that match left a permanent blank ('','') option after every
+    // choice field write (live Rosetta v9 coded-pairs).
+    const removes = findCodedValueRemoveControls(observation);
+    if (removes.length === 0) {
+      // Could not undo the nudge — still try to drop an empty trailing row
+      // by re-finding after a beat rather than leaving the blank option.
+      return;
+    }
+    await this.driver.click(removes[removes.length - 1].handle);
+    await this.sleep(150);
+  }
+
+  /**
+   * Drop trailing empty code/label rows left by a failed canvas-refresh nudge
+   * or by editors that keep a blank starter row after real values are filled.
+   */
+  private async pruneEmptyCodedValueRows(
+    codesOf: (o: Observation) => ReturnType<typeof findByRole>,
+    keepCount: number,
+  ): Promise<void> {
+    for (let guard = 0; guard < 8; guard += 1) {
+      let { observation } = await this.driver.perceive();
+      const codes = codesOf(observation);
+      if (codes.length <= keepCount) return;
+      // Only prune a row that is still blank — never a filled option.
+      const last = codes[codes.length - 1]?.el;
+      const lastCode = (last?.state.value ?? '').trim();
+      const labels = findByRole(observation, 'textbox', { contains: 'label' })
+        .filter((c) => !codes.some((ci) => ci.el.handle === c.el.handle));
+      const lastLabel = labels[labels.length - 1]?.el;
+      const lastLabelVal = (lastLabel?.state.value ?? '').trim();
+      if (lastCode || lastLabelVal) return;
+      const removes = findCodedValueRemoveControls(observation);
+      if (removes.length === 0) return;
+      await this.driver.click(removes[removes.length - 1].handle);
+      await this.sleep(120);
+    }
+  }
+
   private async executeFieldSetRequired(
     item: LinearItem,
     itemKey: string,
@@ -1192,15 +1327,60 @@ export class Orchestrator {
     intent: IntentRecord,
   ): Promise<void> {
     if (field.required) {
-      const { observation } = await this.driver.perceive();
-      const requiredCheckboxes = findByRole(observation, 'checkbox', { contains: 'require' });
+      let { observation } = await this.driver.perceive();
+      // findByRole matches name OR groupText, so nameless Required checkboxes
+      // on Rosetta/Nexus (broken label[for]) still resolve.
+      let requiredCheckboxes = findByRole(observation, 'checkbox', { contains: 'require' });
+      // FormCraft wizard: one property per step. Required sits after label/type
+      // but BEFORE range. set_range may already have advanced past it — prefer
+      // Back (up to 4) so we do not Next into the next element or onto Done
+      // (Done is a commit-hint decoy that navigates away without saving).
+      // Only then Next at most twice (label→type→required), never a blind 8-step walk.
+      for (let step = 0; step < 4 && requiredCheckboxes.length === 0; step += 1) {
+        const back = findWizardBackControl(observation);
+        if (!back) break;
+        const clicked = await this.driver.click(back.handle);
+        if (!clicked.ok) break;
+        await this.sleep(180);
+        ({ observation } = await this.driver.perceiveAfterSettle(150));
+        requiredCheckboxes = findByRole(observation, 'checkbox', { contains: 'require' });
+      }
+      for (let step = 0; step < 2 && requiredCheckboxes.length === 0; step += 1) {
+        const advance = findWizardAdvanceControl(observation);
+        if (!advance) break;
+        const clicked = await this.driver.click(advance.handle);
+        if (!clicked.ok) break;
+        await this.sleep(180);
+        ({ observation } = await this.driver.perceiveAfterSettle(150));
+        requiredCheckboxes = findByRole(observation, 'checkbox', { contains: 'require' });
+      }
+      // Prefer an unchecked Required over Hidden when both match loosely.
+      const preferred =
+        requiredCheckboxes.find((c) => /requir/i.test(c.el.name || c.el.groupText || '')) ??
+        requiredCheckboxes[0];
 
-      if (requiredCheckboxes.length > 0) {
-        const el = requiredCheckboxes[0].el;
+      if (preferred) {
+        const el = preferred.el;
         if (!el.state.checked) {
           await this.driver.check(el.handle, true);
           await this.sleep(200);
         }
+        // Verify the write stuck — silent required=false was ~47% of Rosetta
+        // required misses when the click hit the wrong or unbound control.
+        const { observation: after } = await this.driver.perceive();
+        const again = findByRole(after, 'checkbox', { contains: 'require' })
+          .find((c) => c.el.handle === el.handle) ??
+          findByRole(after, 'checkbox', { contains: 'require' })[0];
+        if (again && !again.el.state.checked) {
+          await this.driver.check(again.el.handle, true);
+          await this.sleep(150);
+        }
+      } else {
+        this.journal.note(
+          this.sourceOf(item).path,
+          `field.set_required: no Required checkbox found for "${field.label}" ` +
+          `(wanted required=true); leaving for commit-time verify`,
+        );
       }
     }
 
@@ -1218,7 +1398,7 @@ export class Orchestrator {
     // committed, which is the only surface that speaks for what was persisted
     // -- and persistence is the thing being claimed.
     const { observation: finalObs } = await this.driver.perceiveAfterSettle(300);
-    const verdict = compareIntent(finalObs, intent);
+    const verdict = this.countUnobservable(compareIntent(finalObs, intent));
 
     if (verdict.verdict !== 'VERIFIED') {
       this.pendingVerification.push({ itemKey, item, field, intent });
@@ -1260,44 +1440,319 @@ export class Orchestrator {
     }
   }
 
+  private async executeFieldSetFormula(
+    item: LinearItem,
+    itemKey: string,
+    field: IrField,
+  ): Promise<void> {
+    if (!field.formula) {
+      await this.markVerified(itemKey, {
+        rung: 0,
+        evidence: ['no formula in IR; nothing to write'],
+        reason: 'set_formula skipped (empty)',
+      });
+      return;
+    }
+
+    const { observation } = await this.driver.perceive();
+    const input = FieldPropertyWrites.findFormulaInput(observation);
+    if (!input) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason: 'no formula/expression input found in the property editor',
+        suspectedTrap:
+          'calculated fields expose a formula editor only when that type is ' +
+          'selected; the type may not have settled, or this platform names it oddly',
+        evidence: ['field.set_formula: formula input absent'],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
+    }
+
+    await this.driver.setValue(input.handle, field.formula);
+    await this.sleep(200);
+
+    const { observation: after } = await this.driver.perceiveAfterSettle(200);
+    const check = FieldPropertyWrites.formulaLooksSet(after, field.formula);
+    if (check.ok) {
+      await this.markVerified(itemKey, {
+        rung: 0,
+        evidence: [check.evidence],
+        reason: check.evidence,
+      });
+      return;
+    }
+
+    await this.escalateItem(itemKey, 'verifying', {
+      key: itemKey,
+      fieldLabel: field.label,
+      formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+      visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+      canonicalType: field.canonical_type,
+      reason: check.evidence,
+      suspectedTrap: 'formula write did not stick on read-back',
+      evidence: [check.evidence],
+      phase: 'verifying',
+    }, /* blocking */ false);
+  }
+
   private async executeFieldSetSkipLogic(
     item: LinearItem,
     itemKey: string,
     field: IrField,
   ): Promise<void> {
-    if (!field.skip_logic) return;
+    if (!field.skip_logic) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason: 'set_skip_logic planned but IR has no skip_logic on this field',
+        evidence: ['missing field.skip_logic'],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
+    }
+
+    // Form-end: the property editor may still be showing a different field.
+    // Open this field first so Visibility / When / Equals controls exist.
+    if (!(await this.selectFieldForProperties(field))) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason: `could not select field "${field.label}" on the canvas to edit skip logic`,
+        evidence: ['selectFieldForProperties failed'],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
+    }
 
     const { observation } = await this.driver.perceive();
+    const mode = FieldPropertyWrites.findVisibilityModeControl(observation);
+    if (!mode) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason: 'no visibility/display-mode control found in the property editor',
+        suspectedTrap:
+          'skip logic is unbindable on this surface, or the field was not selected',
+        evidence: ['visibility mode control absent'],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
+    }
 
-    // Find visibility/conditional selector.
-    const visCandidates = findByRole(observation, 'combobox', { contains: 'visib' })
-      .concat(findByRole(observation, 'listbox', { contains: 'visib' }))
-      .concat(findByRole(observation, 'combobox', { contains: 'conditional' }));
+    const conditionalOption = FieldPropertyWrites.pickConditionalModeOption(mode.options);
+    if (!conditionalOption) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason:
+          `visibility control "${mode.name}" has no option that looks conditional ` +
+          `(options: ${mode.options.join(' | ') || 'none'})`,
+        evidence: [`options=[${mode.options.join(', ')}]`],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
+    }
 
-    if (visCandidates.length > 0) {
-      // Select "Conditional" or equivalent.
-      await this.driver.selectOption(visCandidates[0].el.handle, 'Conditional');
-      await this.sleep(300);
-
-      // Re-observe for the when/value inputs.
-      const { observation: freshObs } = await this.driver.perceive();
-
-      // Find the "when" field selector.
-      const whenSelects = findByRole(freshObs, 'combobox', { contains: 'when' })
-        .concat(findByRole(freshObs, 'listbox', { contains: 'when' }));
-      if (whenSelects.length > 0) {
-        await this.driver.selectOption(whenSelects[0].el.handle, field.skip_logic.when_field_label);
-        await this.sleep(200);
+    // Select the platform's OWN option label (e.g. "Visible When…"), never a
+    // hardcoded "Conditional" string that Mock A does not offer.
+    //
+    // Mock A setVisibilityMode('when') RESETS whenElementId/equalsValue every
+    // time. Re-picking an already-conditional mode would wipe a partial write
+    // and is unnecessary — only change the mode when it is not yet conditional.
+    const modeValue = (mode.state.value ?? '').toLowerCase();
+    const alreadyConditional =
+      modeValue === 'when' ||
+      modeValue === conditionalOption.toLowerCase() ||
+      modeValue.includes('when') ||
+      ['when', 'conditional', 'if', 'depends'].some((w) => modeValue.includes(w));
+    if (!alreadyConditional) {
+      const modeRes = await this.driver.selectOption(mode.handle, conditionalOption);
+      if (!modeRes.ok) {
+        await this.escalateItem(itemKey, 'acting', {
+          key: itemKey,
+          fieldLabel: field.label,
+          formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+          visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+          canonicalType: field.canonical_type,
+          reason: `failed to select visibility option "${conditionalOption}": ${modeRes.error ?? 'unknown'}`,
+          evidence: [modeRes.error ?? 'selectOption failed'],
+          phase: 'acting',
+        }, /* blocking */ false);
+        return;
       }
+      await this.sleep(300);
+    }
 
-      // Find the value input.
-      const { observation: freshObs2 } = await this.driver.perceive();
-      const valueInputs = findByRole(freshObs2, 'textbox', { contains: 'value' })
-        .concat(findByRole(freshObs2, 'textbox', { contains: 'equal' }));
-      if (valueInputs.length > 0) {
-        await this.driver.setValue(valueInputs[0].el.handle, field.skip_logic.equals_value);
+    const { observation: afterMode } = await this.driver.perceive();
+    const whenSelect = FieldPropertyWrites.findWhenFieldControl(
+      afterMode,
+      field.skip_logic.when_field_label,
+    );
+    if (!whenSelect) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason:
+          'visibility is conditional but no when-element select appeared — ' +
+          'Mock A only persists skipLogic when whenElementId is set',
+        evidence: ['when-element control absent after selecting conditional mode'],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
+    }
+
+    const whenOption =
+      FieldPropertyWrites.pickOptionLabel(
+        whenSelect.options,
+        field.skip_logic.when_field_label,
+      ) ?? field.skip_logic.when_field_label;
+    const whenRes = await this.driver.selectOption(whenSelect.handle, whenOption);
+    if (!whenRes.ok) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason:
+          `failed to select controlling field "${field.skip_logic.when_field_label}" ` +
+          `in when-control: ${whenRes.error ?? 'unknown'}`,
+        suspectedTrap:
+          'when-element list may have self-excluded the controlling field because ' +
+          'the options panel was still editing that field (or a neighbour), not ' +
+          `"${field.label}"`,
+        evidence: [whenRes.error ?? 'selectOption failed'],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
+    }
+    await this.sleep(200);
+
+    const { observation: afterWhen } = await this.driver.perceive();
+    const valueInput = FieldPropertyWrites.findEqualsValueInput(afterWhen);
+    if (!valueInput) {
+      await this.escalateItem(itemKey, 'acting', {
+        key: itemKey,
+        fieldLabel: field.label,
+        formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+        visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+        canonicalType: field.canonical_type,
+        reason: 'no equals-value input found after setting when-element',
+        evidence: ['equals-value input absent'],
+        phase: 'acting',
+      }, /* blocking */ false);
+      return;
+    }
+
+    await this.driver.setValue(valueInput.handle, field.skip_logic.equals_value);
+    await this.sleep(150);
+
+    const { observation: finalObs } = await this.driver.perceiveAfterSettle(250);
+    const onField = FieldPropertyWrites.propertyPanelShowsField(finalObs, field.label);
+    const check = FieldPropertyWrites.skipLogicLooksSet(
+      finalObs,
+      field.skip_logic.equals_value,
+      field.skip_logic.when_field_label,
+    );
+    if (check.ok && onField) {
+      await this.markVerified(itemKey, {
+        rung: 0,
+        evidence: [check.evidence, `mode option="${conditionalOption}"`],
+        reason: check.evidence,
+      });
+      return;
+    }
+
+    await this.escalateItem(itemKey, 'verifying', {
+      key: itemKey,
+      fieldLabel: field.label,
+      formName: this.irFormMap.get(item.form_id)?.name ?? item.form_id,
+      visitName: this.irVisitMap.get(item.visit_id)?.name ?? item.visit_id,
+      canonicalType: field.canonical_type,
+      reason: onField ? check.evidence : `options panel is not editing "${field.label}" after skip write`,
+      suspectedTrap: onField
+        ? 'skip logic write did not read back'
+        : 'skip logic may have been written onto a different selected field',
+      evidence: [
+        check.evidence,
+        `tried mode option="${conditionalOption}"`,
+        onField ? 'property Label matches field' : 'property Label mismatch',
+      ],
+      phase: 'verifying',
+    }, /* blocking */ false);
+  }
+
+  /**
+   * Click the canvas control for a field so its property editor is showing.
+   * Required before form-end skip-logic writes: the options panel only edits
+   * the currently selected element.
+   */
+  private async selectFieldForProperties(field: IrField): Promise<boolean> {
+    // Form-end skip writes must edit THIS field's visibility. If the previous
+    // field (e.g. Outcome before Resolution Date) is still selected, When
+    // Element self-excludes that controlling label and selectOption fails —
+    // the live 4/13 miss pattern.
+    let { observation } = await this.driver.perceive();
+    if (FieldPropertyWrites.propertyPanelShowsField(observation, field.label)) {
+      return true;
+    }
+
+    const tryClick = async (handle: string): Promise<boolean> => {
+      await this.driver.click(handle);
+      await this.sleep(250);
+      const { observation: after } = await this.driver.perceive();
+      return FieldPropertyWrites.propertyPanelShowsField(after, field.label);
+    };
+
+    const match = resolveByName(observation, field.label);
+    if (match && match !== 'ambiguous') {
+      if (await tryClick(match.el.handle)) return true;
+      // Option-group / card-group: try every member.
+      if (match.members) {
+        for (const m of match.members) {
+          if (await tryClick(m.handle)) return true;
+        }
       }
     }
+
+    // Ambiguous or click-on-inner-control did not select the card: try every
+    // exact-name hit (canvas + preview duplicates).
+    const exact = observation.elements.filter((e) => e.name === field.label);
+    for (const el of exact) {
+      if (await tryClick(el.handle)) return true;
+    }
+
+    // Last resort: any control whose group text parts include the label
+    // (element-card chrome), preferring ones that are not the options Label.
+    const grouped = observation.elements.filter((e) =>
+      e.groupTextParts?.some((p) => p.trim() === field.label),
+    );
+    for (const el of grouped) {
+      if (await tryClick(el.handle)) return true;
+    }
+
+    ({ observation } = await this.driver.perceive());
+    return FieldPropertyWrites.propertyPanelShowsField(observation, field.label);
   }
 
   // -------------------------------------------------------------------------
@@ -1313,28 +1768,57 @@ export class Orchestrator {
     const visitNames = [...this.irVisitMap.values()].map((v) => v.name);
     const createControl = this.bindings['visit.create']?.recipe?.[0]?.evidence_name;
 
+    // Already on this visit's form list (e.g. just left its designer via
+    // breadcrumb). Re-climbing to the schedule and re-clicking the visit is
+    // unnecessary — and hostile ascend ranking used to fail that climb, so
+    // Screening escalated as "could not open" after Demographics was built.
+    {
+      const { observation: here } = await this.driver.perceive();
+      if (atVisitDetail(here, visit.name, visitNames)) {
+        this.currentVisitId = visitId;
+        this.currentFormId = null;
+        return true;
+      }
+    }
+
     // Climb to the visit list, CONFIRMING arrival instead of assuming it.
     // A single pre-bound "go to study root" click cannot do this job: on the
     // supplied mock that control is the already-active nav tab and is inert at
     // every depth, so the run silently stayed inside one visit and built every
     // form into it.
     const hops: string[] = [];
-    let reached = atVisitList(
-      (await this.driver.perceive()).observation, visitNames, createControl,
-    );
+    // Visit detail exposes form-create; that must never count as "reached the
+    // visit list" even if visit.create was rebound to "+ New Record Sheet".
+    const onVisitList = (o: Observation) =>
+      atVisitList(o, visitNames, createControl) && !atVisitDetail(o);
+    let reached = onVisitList((await this.driver.perceive()).observation);
     for (let hop = 0; hop < 4 && !reached; hop += 1) {
       const { observation } = await this.driver.perceive();
+      // Still inside this visit's form list after a hop (e.g. designer →
+      // detail via "<- Screening"). That IS the destination — keep climbing
+      // and we leave it for the schedule, then fail to re-open (Hostile E2E
+      // v6 Screening "could not open this visit" after Demographics).
+      if (atVisitDetail(observation, visit.name, visitNames)) {
+        this.currentVisitId = visitId;
+        this.currentFormId = null;
+        return true;
+      }
       const best = rankAscendCandidates(observation, visitNames)[0];
       if (!best) break;
       await this.driver.click(best.handle);
       await this.sleep(450);
       const { observation: after } = await this.driver.perceiveAfterSettle(200);
       hops.push(best.name);
-      reached = atVisitList(after, visitNames, createControl);
+      if (atVisitDetail(after, visit.name, visitNames)) {
+        this.currentVisitId = visitId;
+        this.currentFormId = null;
+        return true;
+      }
+      reached = onVisitList(after);
     }
 
     if (!reached) {
-      await this.escalateItem(`visit-nav:${visitId}`, 'acting', {
+      const decision = await this.escalateItem(`visit-nav:${visitId}`, 'acting', {
         key: `visit-nav:${visitId}`,
         fieldLabel: '(whole visit)',
         canonicalType: 'text',
@@ -1350,7 +1834,22 @@ export class Orchestrator {
         evidence: hops.length ? [`ascended via: ${hops.join(' -> ')}`] : ['no ascend candidate found'],
         phase: 'acting',
       }, /* blocking */ true);
-      return false;
+
+      // Human may have navigated to the visit list (or into this visit) while
+      // the gate was up. Do not skipSpan a fresh study after Approve.
+      const { observation: now } = await this.driver.perceive();
+      if (atVisitDetail(now, visit.name, visitNames)) {
+        this.currentVisitId = visitId;
+        this.currentFormId = null;
+        return true;
+      }
+      if (onVisitList(now)) {
+        reached = true;
+      } else if (!decision || decision.action === 'skip') {
+        return false;
+      } else {
+        return false;
+      }
     }
 
     // Remember what this surface offers. There is no working copy on the visit
@@ -1378,15 +1877,23 @@ export class Orchestrator {
     const link = nameMatches(listed);
     let opened = false;
     if (link) {
-      await this.driver.click(link.handle);
-      await this.sleep(500);
-      const { observation: after } = await this.driver.perceiveAfterSettle(250);
-      // We have descended out of the visit list into this visit's contents.
-      opened = !atVisitList(after, visitNames, createControl);
+      for (let attempt = 0; attempt < 2 && !opened; attempt += 1) {
+        await this.driver.click(link.handle);
+        await this.sleep(500 + attempt * 300);
+        const { observation: after } = await this.driver.perceiveAfterSettle(250 + attempt * 200);
+        // Prefer positive structural proof (form-create control on the visit
+        // detail) over negating atVisitList — inert "Phases" chrome made the
+        // negation unreliable and blocked Screening after the create-control fix.
+        // Prefer positive form-create proof. Negating atVisitList alone is not
+        // enough when a poisoned createControl made the list witness fire on
+        // detail — require that we left the list OR landed on detail.
+        opened = atVisitDetail(after, visit.name, visitNames)
+          || (Boolean(link) && !onVisitList(after));
+      }
     }
 
     if (!opened) {
-      await this.escalateItem(`visit-open:${visitId}`, 'acting', {
+      const decision = await this.escalateItem(`visit-open:${visitId}`, 'acting', {
         key: `visit-open:${visitId}`,
         fieldLabel: '(whole visit)',
         canonicalType: 'text',
@@ -1399,12 +1906,57 @@ export class Orchestrator {
         evidence: [`visit control ${link ? `"${link.name}" clicked` : 'not found'}`],
         phase: 'acting',
       }, /* blocking */ true);
-      return false;
+
+      // ROOT CAUSE of swapped/Nexus "208 skipped" after a human Approve on the
+      // visit-open gate: we used to ignore the decision and always return
+      // false → skipSpan the entire visit. Approve looked like consent to
+      // continue, but the schedule still skipped. Re-perceive first — the
+      // human may have opened the visit while the gate was up — and on
+      // retry/approve, attempt one more open before giving up.
+      const recovered = await this.confirmVisitOpenAfterGate(
+        visitId, visit.name, visitNames, onVisitList, nameMatches, decision,
+      );
+      if (!recovered) return false;
     }
 
     this.currentVisitId = visitId;
     this.currentFormId = null;
     return true;
+  }
+
+  /**
+   * After a blocking visit-open gate, decide whether the visit is now open.
+   * Surface evidence wins over the button label: Approve without the visit
+   * detail on screen still refuses (do not build into the wrong visit).
+   */
+  private async confirmVisitOpenAfterGate(
+    _visitId: string,
+    visitName: string,
+    visitNames: string[],
+    onVisitList: (o: Observation) => boolean,
+    nameMatches: (o: Observation) => ReturnType<typeof enumerateActionable>[number] | undefined,
+    decision: { action: string } | null,
+  ): Promise<boolean> {
+    const detailOk = (o: Observation) =>
+      atVisitDetail(o, visitName, visitNames);
+
+    let { observation: now } = await this.driver.perceive();
+    if (navGateAllowsContinue(decision, detailOk(now))) return true;
+
+    if (!navGateShouldRetryOpen(decision)) return false;
+
+    // retry / approve: one more click on the visit control if listed.
+    const link = nameMatches(now);
+    if (link) {
+      await this.driver.click(link.handle);
+      await this.sleep(500);
+      ({ observation: now } = await this.driver.perceiveAfterSettle(250));
+      if (navGateAllowsContinue(decision, detailOk(now))) return true;
+      // Left the list without a named detail witness — still accept when the
+      // create-control witness says we are no longer on the visit list.
+      if (!onVisitList(now) && link) return true;
+    }
+    return navGateAllowsContinue(decision, detailOk(now));
   }
 
   private async createVisit(visit: IrVisit): Promise<void> {
@@ -1442,37 +1994,78 @@ export class Orchestrator {
     }
 
     // Fill in the visit name.
-    const { observation: formObs } = await this.driver.perceive();
-    const textPool = enumerateByRoles(formObs, ['textbox', 'searchbox']);
-    say(`text inputs after opening=[${textPool.map((e) => e.name).join(', ')}]`);
-    const nameBox = rankCandidates(textPool, { hint: 'name_input' })[0]?.el;
-    say(`name input=${nameBox ? JSON.stringify(nameBox.name) : 'NONE FOUND'}`);
+    // Hostile Prism: nameless contenteditables — disambiguate via groupText
+    // ("Wave Name" vs "Window Start/End (day)"). Demote window hints so the
+    // visit title cannot land in a day field (live v12: names became -1/0/31/87).
+    let { observation: formObs } = await this.driver.perceive();
+    let textPool = enumerateByRoles(formObs, ['textbox', 'searchbox']);
+    say(`text inputs after opening=[${textPool.map((e) => `${e.name}|g:${e.groupText ?? ''}`).join(', ')}]`);
+    const nameBox = rankCandidates(textPool, {
+      hint: 'name_input',
+      demote: ['window_start', 'window_end'],
+      scoreGroupText: true,
+    })[0]?.el;
+    say(`name input=${nameBox ? JSON.stringify(nameBox.name || nameBox.groupText || '') : 'NONE FOUND'}`);
     if (nameBox) {
       const wrote = await this.driver.setValue(nameBox.handle, visit.name);
       if (!wrote.ok) say(`name write FAILED: ${wrote.error ?? 'unknown'}`);
+      // Contenteditable hosts (Prism Wave Name) rebuild the dialog on input —
+      // refresh before writing window bounds so handles are not stale.
+      ({ observation: formObs } = await this.driver.perceive());
+      textPool = enumerateByRoles(formObs, ['textbox', 'searchbox']);
     }
 
-    // Fill in the visit window. Both bounds are ranked over the same pool and
-    // the top two distinct candidates are used, so a platform naming them
-    // anything at all still gets values written; the read-back confirms.
-    const startBox = rankCandidates(textPool, { hint: 'window_start' })[0]?.el;
-    const endCandidates = rankCandidates(textPool, { hint: 'window_end' });
-    const endBox = (endCandidates.find((c) => c.el.handle !== startBox?.handle) ?? endCandidates[0])?.el;
-    if (startBox && startBox.handle !== nameBox?.handle) {
+    // Fill in the visit window. Rank start/end with name demoted; always pick
+    // three DISTINCT handles so end cannot overwrite Wave Name when start was
+    // skipped due to a name/window tie.
+    const nameNowHandle = rankCandidates(textPool, {
+      hint: 'name_input',
+      demote: ['window_start', 'window_end'],
+      scoreGroupText: true,
+    })[0]?.el?.handle;
+    const startBox = rankCandidates(textPool, {
+      hint: 'window_start',
+      demote: ['name_input', 'window_end'],
+      scoreGroupText: true,
+    })
+      .map((c) => c.el)
+      .find((el) => el.handle !== nameNowHandle);
+    if (startBox) {
       await this.driver.setValue(startBox.handle, String(visit.window_start_day));
+      ({ observation: formObs } = await this.driver.perceive());
+      textPool = enumerateByRoles(formObs, ['textbox', 'searchbox']);
     }
-    if (endBox && endBox.handle !== nameBox?.handle && endBox.handle !== startBox?.handle) {
-      await this.driver.setValue(endBox.handle, String(visit.window_end_day));
+    const nameAfterStart = rankCandidates(textPool, {
+      hint: 'name_input',
+      demote: ['window_start', 'window_end'],
+      scoreGroupText: true,
+    })[0]?.el?.handle;
+    const startAfter = rankCandidates(textPool, {
+      hint: 'window_start',
+      demote: ['name_input', 'window_end'],
+      scoreGroupText: true,
+    })
+      .map((c) => c.el)
+      .find((el) => el.handle !== nameAfterStart)?.handle;
+    const endFresh = rankCandidates(textPool, {
+      hint: 'window_end',
+      demote: ['name_input', 'window_start'],
+      scoreGroupText: true,
+    })
+      .map((c) => c.el)
+      .find((el) => el.handle !== nameAfterStart && el.handle !== startAfter);
+    if (endFresh) {
+      await this.driver.setValue(endFresh.handle, String(visit.window_end_day));
     }
 
     // Click save. Read the name field back FIRST: a platform that silently
     // drops the write (its own draft never updated) looks identical to one
     // that saved nothing, and only this distinguishes them.
     const { observation: saveObs } = await this.driver.perceive();
-    const nameNow = nameBox
-      ? enumerateByRoles(saveObs, ['textbox', 'searchbox'])
-          .find((e) => e.handle === nameBox.handle)?.state.value
-      : undefined;
+    const nameNow = rankCandidates(
+      enumerateByRoles(saveObs, ['textbox', 'searchbox']),
+      { hint: 'name_input', demote: ['window_start', 'window_end'], scoreGroupText: true },
+    )[0]?.el?.state.value;
     say(`name reads back as ${JSON.stringify(nameNow ?? null)} (wanted ${JSON.stringify(visit.name)})`);
 
     const saveBtn = this.pickDialogCommit(saveObs);
@@ -1553,7 +2146,7 @@ export class Orchestrator {
     if (!opened) {
       // Never claim a form is open when the read-back disagrees: that is the
       // failure that silently writes 195 fields into the wrong document.
-      await this.escalateItem(`form-open:${formId}`, 'acting', {
+      const decision = await this.escalateItem(`form-open:${formId}`, 'acting', {
         key: `form-open:${formId}`,
         fieldLabel: '(whole form)',
         canonicalType: 'text',
@@ -1572,7 +2165,23 @@ export class Orchestrator {
         ),
         phase: 'acting',
       }, /* blocking */ true);
-      return false;
+
+      let { observation: now } = await this.driver.perceive();
+      if (surfaceShowsForm(now, form.name, siblings, [visitName])) {
+        opened = true;
+      } else if (decision && decision.action !== 'skip') {
+        const retryCands = resolveFormOpenCandidates(now, form.name, [visitName]);
+        for (const cand of retryCands.slice(0, 2)) {
+          await this.driver.click(cand.handle);
+          await this.sleep(500);
+          ({ observation: now } = await this.driver.perceiveAfterSettle(250));
+          if (surfaceShowsForm(now, form.name, siblings, [visitName])) {
+            opened = true;
+            break;
+          }
+        }
+      }
+      if (!opened) return false;
     }
 
     this.currentFormId = formId;
@@ -1630,7 +2239,7 @@ export class Orchestrator {
   }
 
   private async discoverFormBuilder(): Promise<void> {
-    const { observation } = await this.driver.perceive();
+    let { observation } = await this.driver.perceive();
 
     // Adopt only what the BUILDER owns. Re-binding everything from this screen
     // rebinds controls that live elsewhere against whatever happens to look
@@ -1647,7 +2256,7 @@ export class Orchestrator {
     // on the surfaces where those controls actually live.
     const BUILDER_OWNED: readonly ContractOpId[] = [
       'field.add', 'field.set_label', 'field.set_required', 'field.set_range',
-      'field.set_coded_values', 'field.set_skip_logic',
+      'field.set_coded_values', 'field.set_skip_logic', 'field.set_formula',
       'ctx.commit', 'ctx.is_committed', 'ctx.discard',
       'form.list_fields', 'field_palette.open',
     ];
@@ -1658,7 +2267,9 @@ export class Orchestrator {
       }
     }
 
-    // Bind all 13 canonical types in the palette
+    // Bind all 13 canonical types in the palette. Open a modal library first
+    // when needed so name hypotheses can see Orbit Set / Pick One tiles.
+    observation = await this.probeRunner.ensureFieldPaletteOpen(observation);
     for (const type of CANONICAL_TYPES) {
       if (!this.typeBindings[type]) {
         const tb = bindFieldAdd(observation, type);
@@ -1757,7 +2368,7 @@ export class Orchestrator {
     let recovered = 0;
 
     for (const { itemKey, item, field, intent } of pending) {
-      const verdict = compareIntent(observation, intent);
+      const verdict = this.countUnobservable(compareIntent(observation, intent));
 
       if (verdict.verdict === 'VERIFIED') {
         await applyTransition(this.adapter, this.runState, itemKey, 'verify_verified');
@@ -1831,7 +2442,26 @@ export class Orchestrator {
     // "save", DOM order put the decoy first, it was clicked once, correctly
     // reported as not-a-commit, and then the form was abandoned uncommitted
     // and its entire contents lost on the next navigation.
-    const trials = rankCommitCandidates(observation)
+    // Reveal Commit when it lives behind a hamburger (FormCraft).
+    let commitObs = observation;
+    const hasCommitControl = (obs: Observation) =>
+      enumerateActionable(obs).some((e) => matchesHintExact(e.name, 'commit'));
+    if (!hasCommitControl(commitObs)) {
+      const menuish = enumerateActions(commitObs).filter((e) => {
+        const n = (e.name || '').trim();
+        if (!n) return false;
+        if (n.length <= 2) return true;
+        return matchesHintWord(n, 'menu') || matchesHintExact(n.toLowerCase(), 'menu');
+      });
+      for (const opener of menuish.slice(0, 3)) {
+        await this.driver.click(opener.handle);
+        await this.sleep(150);
+        commitObs = (await this.driver.perceive()).observation;
+        if (hasCommitControl(commitObs)) break;
+      }
+    }
+
+    const trials = rankCommitCandidates(commitObs)
       .map((r) => r.el)
       .filter((el) => !this.crossScreenChrome.has(normaliseLabel(el.name)));
     const MAX_COMMIT_TRIALS = 6;
@@ -2037,6 +2667,14 @@ export class Orchestrator {
   // Escalation.
   // -------------------------------------------------------------------------
 
+  /** Record what a read-back could not check, so the run can say it once. */
+  private countUnobservable(verdict: VerdictResult): VerdictResult {
+    for (const attr of verdict.unobservable ?? []) {
+      this.unobservable.set(attr, (this.unobservable.get(attr) ?? 0) + 1);
+    }
+    return verdict;
+  }
+
   /**
    * Escalate an item to the human gate.
    *
@@ -2049,6 +2687,7 @@ export class Orchestrator {
    * Items sharing a groupKey resolve together: answering "single_select maps
    * to Beam Pick" once settles all 14 single_select fields.
    */
+
   private async escalateItem(
     itemKey: string,
     phase: 'binding' | 'acting' | 'verifying',
@@ -2066,20 +2705,50 @@ export class Orchestrator {
       await applyTransition(this.adapter, this.runState, itemKey, 'escalate');
     }
 
-    const item: EscalationItem = { ...escalation, blocking };
-    this.callbacks.onEscalation(item);
+    // Verifying findings mean the field is already in the study. They are
+    // never a reason to halt the schedule — live hostile v7 parked the whole
+    // run on "Built — needs a look" for Sex at Birth after Demographics was
+    // otherwise clean, and later visits never built (~75% of score).
+    const effectiveBlocking = escalationIsBlocking(phase, blocking);
+    const item: EscalationItem = {
+      ...escalation,
+      phase,
+      blocking: effectiveBlocking,
+    };
 
     const source = this.sourceOfKey(itemKey, escalation);
 
-    if (!blocking) {
-      // Park it. The run continues; the reviewer clears the pile at the end.
+    if (!effectiveBlocking) {
+      // Park silently. Do not broadcast a mid-run ESCALATION card: Approve/Skip
+      // on a parked "Built — needs a look" looks like a gate and caused
+      // computerUse (and humans) to stop while the orchestrator could continue.
+      // The pile is delivered once via onParkedReview at the end of the run.
       this.parked.push(item);
       this.journal.escalated(source, escalation.reason, null);
       return null;
     }
 
+    this.callbacks.onEscalation(item);
+
+    // Blocking waits can sit for minutes with no tab traffic. MV3 will still
+    // kill an "idle" worker even while this Promise is outstanding; touch
+    // extension state on an interval so keep-alive stays honest for the whole
+    // gate, not just while the sidepanel port happens to be connected.
     const decision = await new Promise<HumanDecision>((resolve) => {
-      this.escalationQueue.set(itemKey, { resolve });
+      const pulse = setInterval(() => {
+        try {
+          void chrome.storage?.session?.set({ keepaliveTick: Date.now() });
+        } catch {
+          // chrome may be unavailable in unit tests
+        }
+      }, 20000);
+      this.escalationQueue.set(itemKey, {
+        item,
+        resolve: (d: HumanDecision) => {
+          clearInterval(pulse);
+          resolve(d);
+        },
+      });
     });
 
     this.journal.escalated(source, escalation.reason, {
@@ -2104,10 +2773,18 @@ export class Orchestrator {
     } else if (decision.action === 'override' && decision.overrideType) {
       const field = this.irFieldMap.get(this.runState.items[itemKey]?.field_id ?? '');
       if (field) {
-        const newBinding = bindFieldAdd(
-          (await this.driver.perceive()).observation,
-          decision.overrideType,
-        );
+        const target = decision.overrideType;
+        const { observation } = await this.driver.perceive();
+        // Name synonyms miss hostile palette labels ("Dial Group", "Solar Mark");
+        // fall back to place-and-inspect so Change-type still installs a binding.
+        let newBinding = bindFieldAdd(observation, target);
+        if (!newBinding) {
+          const probed = await this.probeRunner.probePalette(observation);
+          for (const [t, b] of Object.entries(probed.bindings)) {
+            if (b) this.typeBindings[t as CanonicalType] = this.typeBindings[t as CanonicalType] ?? b;
+          }
+          newBinding = this.typeBindings[target] ?? probed.bindings[target] ?? null;
+        }
         if (newBinding) {
           this.typeBindings[field.canonical_type] = newBinding;
         }
@@ -2121,7 +2798,7 @@ export class Orchestrator {
   /** Best-effort provenance for an escalation, which may not have a LinearItem. */
   private sourceOfKey(itemKey: string, e: Omit<EscalationItem, 'blocking'>): IrSource {
     const item = this.linearItems.find(
-      (i) => idempotencyKey(i.visit_id, i.form_id, i.field_id) === itemKey,
+      (i) => stepIdempotencyKey(i) === itemKey,
     );
     if (item) return this.sourceOf(item);
     return {

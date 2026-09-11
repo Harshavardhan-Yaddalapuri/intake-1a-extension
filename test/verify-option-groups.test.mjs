@@ -78,12 +78,16 @@ test('a neighbouring field is never swallowed', () => {
 
 test('an option group needs at least two members of the SAME role', () => {
   // One option is not a group; mixed roles are not one control's options.
+  // Both are still FOUND -- the card around them carries the field's name --
+  // but neither may be read as the field's list of choices, so neither passes.
   const single = screen(card('Race', `<input type="checkbox" aria-label="Race: White">`));
-  assert.equal(resolveByName(single, 'Race'), null, 'a single option is not a group');
+  assert.notEqual(resolveByName(single, 'Race')?.viaOptionGroup, true, 'a single option is not a group');
+  assert.equal(compareIntent(single, intent('multi_select', 'Race')).verdict, 'AMBIGUOUS');
 
   const mixed = screen(card('Race',
     `<input type="checkbox" aria-label="Race: White"><select aria-label="Race: Asian"></select>`));
-  assert.equal(resolveByName(mixed, 'Race'), null, 'mixed roles are not one field');
+  assert.notEqual(resolveByName(mixed, 'Race')?.viaOptionGroup, true, 'mixed roles are not one field');
+  assert.equal(compareIntent(mixed, intent('multi_select', 'Race')).verdict, 'AMBIGUOUS');
 });
 
 test('ordinary single-control fields are untouched', () => {

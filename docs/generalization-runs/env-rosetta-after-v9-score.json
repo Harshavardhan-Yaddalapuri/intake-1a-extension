@@ -1,0 +1,152 @@
+{
+  "platform": "env-rosetta",
+  "overall_match_pct": 84.25,
+  "total_expected": 1067,
+  "total_matched": 899,
+  "criteria": {
+    "visits": {
+      "expected": 4,
+      "matched": 4,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "visit-windows": {
+      "expected": 4,
+      "matched": 4,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "forms": {
+      "expected": 28,
+      "matched": 28,
+      "match_pct": 100.0,
+      "mismatches": []
+    },
+    "repeating": {
+      "expected": 28,
+      "matched": 23,
+      "match_pct": 82.14,
+      "mismatches": [
+        "visit 'Screening' form 'Medical History' repeating expected True, got False",
+        "visit 'Screening' form 'Prior and Concomitant Medications' repeating expected True, got False",
+        "visit 'Week 4' form 'Adverse Events' repeating expected True, got False",
+        "visit 'Week 4' form 'Concomitant Medications' repeating expected True, got False",
+        "visit 'End of Treatment (Week 12)' form 'Adverse Events' repeating expected True, got False"
+      ]
+    },
+    "fields": {
+      "expected": 28,
+      "matched": 16,
+      "match_pct": 57.14,
+      "mismatches": [
+        "visit 'Screening' form 'Demographics' field count expected 8, got 5",
+        "visit 'Screening' form 'Vital Signs' field count expected 8, got 9",
+        "visit 'Baseline (Day 1)' form 'Vital Signs' field count expected 8, got 9",
+        "visit 'Baseline (Day 1)' form 'Physical Examination' field count expected 6, got 7",
+        "visit 'Baseline (Day 1)' form '12-Lead ECG' field count expected 8, got 9",
+        "visit 'Week 4' form 'Vital Signs' field count expected 8, got 9",
+        "visit 'Week 4' form 'Adverse Events' field count expected 8, got 10",
+        "visit 'Week 4' form 'Local Laboratory - Chemistry' field count expected 7, got 8",
+        "visit 'End of Treatment (Week 12)' form 'Vital Signs' field count expected 8, got 9",
+        "visit 'End of Treatment (Week 12)' form 'Physical Examination' field count expected 6, got 7",
+        "visit 'End of Treatment (Week 12)' form '12-Lead ECG' field count expected 8, got 9",
+        "visit 'End of Treatment (Week 12)' form 'Adverse Events' field count expected 8, got 10"
+      ]
+    },
+    "types": {
+      "expected": 195,
+      "matched": 192,
+      "match_pct": 98.46,
+      "mismatches": [
+        "field 'Ethnicity' MISSING in visit 'Screening' form 'Demographics'",
+        "field 'Height' MISSING in visit 'Screening' form 'Demographics'",
+        "field 'Weight' MISSING in visit 'Screening' form 'Demographics'"
+      ]
+    },
+    "required": {
+      "expected": 195,
+      "matched": 103,
+      "match_pct": 52.82,
+      "mismatches": [
+        "field 'Subject Initials' required expected True, got False",
+        "field 'Date of Birth' required expected True, got False",
+        "field 'Sex at Birth' required expected True, got False",
+        "field 'Ethnicity' MISSING",
+        "field 'Height' MISSING",
+        "field 'Weight' MISSING",
+        "field 'Informed Consent Obtained' required expected True, got False",
+        "field 'Date of Consent' required expected True, got False",
+        "field 'Consent Form Version' required expected True, got False",
+        "field 'Consented By' required expected True, got False",
+        "field 'Age 18 Years or Older at Consent' required expected True, got False",
+        "field 'Confirmed Diagnosis of Plaque Psoriasis' required expected True, got False",
+        "field 'Written Informed Consent Provided' required expected True, got False",
+        "field 'Any Exclusionary Condition Present' required expected True, got False",
+        "field 'Condition' required expected True, got False",
+        "field 'Ongoing' required expected True, got False",
+        "field 'Medication Name' required expected True, got False",
+        "field 'Start Date' required expected True, got False",
+        "field 'Ongoing' required expected True, got False",
+        "field 'Systolic Blood Pressure' required expected True, got False"
+      ]
+    },
+    "coded-pairs": {
+      "expected": 195,
+      "matched": 151,
+      "match_pct": 77.44,
+      "mismatches": [
+        "field 'Sex at Birth' options expected [('F', 'Female'), ('M', 'Male'), ('U', 'Undisclosed')], got [('', ''), ('F', 'Female'), ('M', 'Male'), ('U', 'Undisclosed')]",
+        "field 'Race' options expected [('AI', 'American Indian or Alaska Native'), ('AS', 'Asian'), ('BL', 'Black or African American'), ('OT', 'Other'), ('WH', 'White')], got [('', ''), ('AI', 'American Indian or Alaska Native'), ('AS', 'Asian'), ('BL', 'Black or African American'), ('OT', 'Other'), ('WH', 'White')]",
+        "field 'Ethnicity' MISSING",
+        "field 'Height' MISSING",
+        "field 'Weight' MISSING",
+        "field 'Consented By' options expected [('PI', 'Principal Investigator'), ('SC', 'Study Coordinator'), ('SI', 'Sub-Investigator')], got [('', ''), ('PI', 'Principal Investigator'), ('SC', 'Study Coordinator'), ('SI', 'Sub-Investigator')]",
+        "field 'Exclusionary Conditions' options expected [('BIO', 'Prior Biologic Therapy Within 12 Weeks'), ('INF', 'Active Serious Infection'), ('MALIG', 'Active Malignancy'), ('OTH', 'Other'), ('PREG', 'Pregnant or Breastfeeding')], got [('', ''), ('BIO', 'Prior Biologic Therapy Within 12 Weeks'), ('INF', 'Active Serious Infection'), ('MALIG', 'Active Malignancy'), ('OTH', 'Other'), ('PREG', 'Pregnant or Breastfeeding')]",
+        "field 'Body System' options expected [('CARD', 'Cardiovascular'), ('DERM', 'Dermatologic'), ('GI', 'Gastrointestinal'), ('NEURO', 'Neurological'), ('OTH', 'Other'), ('RESP', 'Respiratory')], got [('', ''), ('CARD', 'Cardiovascular'), ('DERM', 'Dermatologic'), ('GI', 'Gastrointestinal'), ('NEURO', 'Neurological'), ('OTH', 'Other'), ('RESP', 'Respiratory')]",
+        "field 'Route' options expected [('IV', 'Intravenous'), ('OTH', 'Other'), ('PO', 'Oral'), ('SC', 'Subcutaneous'), ('TOP', 'Topical')], got [('', ''), ('IV', 'Intravenous'), ('OTH', 'Other'), ('PO', 'Oral'), ('SC', 'Subcutaneous'), ('TOP', 'Topical')]",
+        "field 'Frequency' options expected [('BID', 'Twice Daily'), ('PRN', 'As Needed'), ('QD', 'Once Daily'), ('TID', 'Three Times Daily')], got [('', ''), ('BID', 'Twice Daily'), ('PRN', 'As Needed'), ('QD', 'Once Daily'), ('TID', 'Three Times Daily')]",
+        "field 'Position' options expected [('SIT', 'Sitting'), ('STA', 'Standing'), ('SUP', 'Supine')], got [('', ''), ('SIT', 'Sitting'), ('STA', 'Standing'), ('SUP', 'Supine')]",
+        "field 'Sample Condition' options expected [('CLOT', 'Clotted'), ('HEM', 'Hemolyzed'), ('INS', 'Insufficient Volume'), ('OK', 'Acceptable')], got [('', ''), ('CLOT', 'Clotted'), ('HEM', 'Hemolyzed'), ('INS', 'Insufficient Volume'), ('OK', 'Acceptable')]",
+        "field 'Visit Type' options expected [('SCH', 'Scheduled'), ('TEL', 'Telephone Contact'), ('UNS', 'Unscheduled')], got [('', ''), ('SCH', 'Scheduled'), ('TEL', 'Telephone Contact'), ('UNS', 'Unscheduled')]",
+        "field 'Position' options expected [('SIT', 'Sitting'), ('STA', 'Standing'), ('SUP', 'Supine')], got [('', ''), ('SIT', 'Sitting'), ('STA', 'Standing'), ('SUP', 'Supine')]",
+        "field 'Body Systems Examined' options expected [('ABD', 'Abdomen'), ('CARD', 'Cardiovascular'), ('HEENT', 'Head, Eyes, Ears, Nose, Throat'), ('NEURO', 'Neurological'), ('RESP', 'Respiratory'), ('SKIN', 'Skin')], got [('', ''), ('ABD', 'Abdomen'), ('CARD', 'Cardiovascular'), ('HEENT', 'Head, Eyes, Ears, Nose, Throat'), ('NEURO', 'Neurological'), ('RESP', 'Respiratory'), ('SKIN', 'Skin')]",
+        "field 'General Appearance' options expected [('ABN', 'Abnormal'), ('NE', 'Not Examined'), ('NORM', 'Normal')], got [('', ''), ('ABN', 'Abnormal'), ('NE', 'Not Examined'), ('NORM', 'Normal')]",
+        "field 'Overall Interpretation' options expected [('ABNCS', 'Abnormal, Clinically Significant'), ('ABNNCS', 'Abnormal, Not Clinically Significant'), ('NORM', 'Normal')], got [('', ''), ('ABNCS', 'Abnormal, Clinically Significant'), ('ABNNCS', 'Abnormal, Not Clinically Significant'), ('NORM', 'Normal')]",
+        "field 'Treatment Arm Assigned' options expected [('HD', 'ABC-1001 300 mg'), ('LD', 'ABC-1001 150 mg'), ('PBO', 'Placebo')], got [('', ''), ('HD', 'ABC-1001 300 mg'), ('LD', 'ABC-1001 150 mg'), ('PBO', 'Placebo')]",
+        "field 'Route of Administration' options expected [('IV', 'Intravenous'), ('PO', 'Oral'), ('SC', 'Subcutaneous')], got [('', ''), ('IV', 'Intravenous'), ('PO', 'Oral'), ('SC', 'Subcutaneous')]",
+        "field 'Injection Site' options expected [('ABD', 'Abdomen'), ('ARM', 'Upper Arm'), ('OTH', 'Other'), ('THIGH', 'Thigh')], got [('', ''), ('ABD', 'Abdomen'), ('ARM', 'Upper Arm'), ('OTH', 'Other'), ('THIGH', 'Thigh')]"
+      ]
+    },
+    "ranges": {
+      "expected": 195,
+      "matched": 186,
+      "match_pct": 95.38,
+      "mismatches": [
+        "field 'Ethnicity' MISSING",
+        "field 'Height' MISSING",
+        "field 'Weight' MISSING",
+        "field 'Dose Administered' range expected [0,1000,mg], got [,1000,mg]",
+        "field 'Dose Administered' range expected [0,1000,mg], got [,1000,mg]",
+        "field 'Alanine Aminotransferase' range expected [0,2000,U/L], got [,2000,U/L]",
+        "field 'Aspartate Aminotransferase' range expected [0,2000,U/L], got [,2000,U/L]",
+        "field 'Total Bilirubin' range expected [0,30,mg/dL], got [,30,mg/dL]",
+        "field 'Creatinine' range expected [0,20,mg/dL], got [,20,mg/dL]"
+      ]
+    },
+    "skip-rules": {
+      "expected": 195,
+      "matched": 192,
+      "match_pct": 98.46,
+      "mismatches": [
+        "field 'Ethnicity' MISSING",
+        "field 'Height' MISSING",
+        "field 'Weight' MISSING"
+      ]
+    }
+  },
+  "runtime": {
+    "escalations": "N/A",
+    "llm_calls": "N/A",
+    "human_decisions": "N/A"
+  }
+}

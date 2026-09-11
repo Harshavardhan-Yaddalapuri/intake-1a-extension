@@ -37,22 +37,33 @@ export type HintKey =
   | 'property_editor'
   | 'decimals'
   | 'formula'
+  | 'visibility'
+  | 'skip_when'
+  | 'skip_value'
   | 'date_options'
   | 'template'
   | 'window_start'
   | 'window_end'
-  | 'repeating';
+  | 'repeating'
+  | 'ascend'
+  | 'chrome'
+  | 'non_palette_action'
+  | 'delete_element'
+  | 'panel_field'
+  | 'wizard_advance'
+  | 'wizard_back'
+  | 'menu';
 
 /** Weak lexical priors. A word here may raise a candidate's rank. A word here
  *  may NEVER remove a candidate from the pool. Words are deliberately generic
  *  and multi-lingual-ish in spirit: they are guesses, not knowledge. */
 export const LEXICAL_HINTS: Record<HintKey, readonly string[]> = {
-  commit: ['save', 'commit', 'persist', 'apply', 'publish', 'submit', 'confirm', 'lock', 'finish', 'done', 'ok'],
+  commit: ['save', 'commit', 'persist', 'apply', 'publish', 'submit', 'confirm', 'lock', 'freeze', 'create', 'finish', 'done', 'ok'],
   discard: ['cancel', 'discard', 'close', 'back', 'abandon', 'revert', 'undo'],
-  palette: ['element', 'library', 'palette', 'control', 'widget', 'component', 'field', 'question', 'item'],
-  visit_create: ['visit', 'phase', 'timepoint', 'event', 'add', 'new', 'create', '+'],
+  palette: ['element', 'node', 'library', 'palette', 'control', 'widget', 'component', 'field', 'question', 'item'],
+  visit_create: ['visit', 'phase', 'timepoint', 'event', 'wave', 'add', 'new', 'create', '+'],
   visit_open: ['visit', 'phase', 'timepoint', 'open', 'edit', 'view'],
-  form_create: ['form', 'document', 'source', 'sheet', 'record', 'crf', 'add', 'new', 'create', '+'],
+  form_create: ['form', 'document', 'source', 'sheet', 'record', 'crf', 'survey', 'questionnaire', 'instrument', 'add', 'new', 'create', '+'],
   form_open: ['form', 'document', 'open', 'edit', 'builder', 'design'],
   coded_values: ['value', 'option', 'choice', 'code', 'item', 'paste', 'bulk', 'list'],
   range: ['min', 'max', 'minimum', 'maximum', 'range', 'limit', 'bound', 'lower', 'upper'],
@@ -61,18 +72,104 @@ export const LEXICAL_HINTS: Record<HintKey, readonly string[]> = {
   visit_list: ['visit', 'schedule', 'phase', 'timeline', 'list'],
   name_input: ['name', 'label', 'title', 'identifier', 'id', 'caption'],
   property_editor: [
-    'label', 'element type', 'visibility', 'delete', 'required', 'hidden',
-    'add value', 'paste values', 'apply pasted', 'minimum', 'maximum', 'units',
-    'decimal places', 'formula', 'allow past', 'allow future',
+    // 'type' covers both "Element Type" and "Node Type" (and similar): without
+    // it, an empty choice control's type-picker combobox is read as the placed
+    // field and classified as single_select -- the inverted-library trap.
+    // Bare 'choice' is NOT listed: it matches canvas labels like "Multi Choice
+    // Box" and would hide the placed control itself.
+    'label', 'element type', 'type', 'visibility', 'delete', 'required', 'hidden',
+    'add value', 'add choice', 'paste values', 'paste choices', 'apply pasted',
+    'append pasted', 'minimum', 'maximum', 'units', 'decimal places', 'formula',
+    'allow past', 'allow future',
   ],
   decimals: ['decimal', 'precision', 'places'],
   formula: ['formula', 'expression', 'calculation', 'derived'],
+  visibility: ['visibility', 'visible', 'show', 'hide', 'display', 'conditional'],
+  // 'element' omitted on purpose: it matches Mock A's 'Element Type' select
+  // and tied with 'When Element', so skip writes bound the type picker (0/13).
+  skip_when: ['when', 'trigger', 'controlling', 'node', 'field'],
+  // bare 'value' omitted: it matches 'Paste Values' and tied with 'Equals Value',
+  // so equals writes landed in the coded-values paste box.
+  skip_value: ['equal', 'equals', 'condition'],
   date_options: ['allow past', 'allow future', 'picker options', 'date range'],
   template: ['template', 'banked', 'bank it', 'library', 'reusable'],
   window_start: ['start', 'from', 'begin', 'day 1', 'lower', 'earliest', 'window'],
   window_end: ['end', 'to', 'until', 'finish', 'upper', 'latest', 'window'],
   repeating: ['repeat', 'recurring', 'multiple', 'many'],
+  // Controls that move UP and out of the surface being worked on. A breadcrumb
+  // out of a form designer is the reliable way back to the visit list, and the
+  // one control a palette probe must never click.
+  ascend: ['back', 'return', 'up'],
+  // Application chrome that rides along in a builder's control cluster: top
+  // nav, inert tabs that lexically resemble a visit list, page/section rails.
+  chrome: [
+    'phases', 'sites', 'data entry', 'trial roadmap', 'study plan',
+    'page', 'page 1', '+ page', '+ section',
+  ],
+  // Controls that act on the working copy rather than adding to it. Clicking
+  // one during a palette probe persists, previews or discards instead of
+  // placing, and the probe reads the wrong answer.
+  non_palette_action: [
+    'preview', 'deploy', 'stash', 'lock', 'freeze', 'bank it', 'save',
+    'activate', 'go live', 'publish', 'done', 'create', 'commit', 'apply',
+    'submit',
+  ],
+  delete_element: ['delete', 'remove', 'erase'],
+  // Property-panel inputs. They sit beside the canvas tile they describe, so
+  // "which control IS the placed field" must not answer with one of these.
+  panel_field: ['label', 'formula', 'expression', 'visibility'],
+  // Stepper 'Next' / 'Back' on wizard builders (FormCraft); not a commit.
+  wizard_advance: ['next'],
+  wizard_back: ['back'],
+  // Overflow / hamburger that reveals Commit when it is not on the bar.
+  menu: ['menu'],
 };
+
+/** Normalised form used by every hint predicate: collapse whitespace, lowercase. */
+function normaliseHintText(s: string): string {
+  return s.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * Hint predicates.
+ *
+ * Callers outside this module must never write an English UI word inline —
+ * test/enumeration-guard.test.mjs fails the build if they do. They ask these
+ * predicates instead, so every word the agent guesses about a platform's
+ * vocabulary is declared in LEXICAL_HINTS above and nowhere else.
+ *
+ * These read a name and return a boolean, so a caller CAN use one as a filter.
+ * That is a deliberate, narrow allowance: a probe that clicks a Save button
+ * instead of a palette tile destroys the surface it was measuring, and no
+ * amount of re-ranking recovers from it. Use them to rank wherever ranking
+ * suffices; exclude only where a wrong click is unrecoverable.
+ */
+
+/** The whole name is one of the hint words. Strictest, and the safest to
+ *  exclude on: "Save" is the save control, "Save Draft As Template" is not. */
+export function matchesHintExact(name: string, ...keys: readonly HintKey[]): boolean {
+  const n = normaliseHintText(name);
+  if (!n) return false;
+  return keys.some((k) => LEXICAL_HINTS[k].some((w) => n === w));
+}
+
+/** A hint word appears as a whole word. "Delete Element" matches 'delete';
+ *  "Undeleted" does not. */
+export function matchesHintWord(name: string, ...keys: readonly HintKey[]): boolean {
+  const n = normaliseHintText(name);
+  if (!n) return false;
+  return keys.some((k) => LEXICAL_HINTS[k].some((w) => {
+    const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?:^|\\s)${escaped}(?:\\s|$)`).test(n);
+  }));
+}
+
+/** A hint word appears anywhere in the name. Loosest — prefer the others. */
+export function matchesHintLoose(name: string, ...keys: readonly HintKey[]): boolean {
+  const n = normaliseHintText(name);
+  if (!n) return false;
+  return keys.some((k) => LEXICAL_HINTS[k].some((w) => n.includes(w)));
+}
 
 /** Signal weights. Structural evidence outranks vocabulary, deliberately:
  *  a control that appeared in the diff we just caused is better evidence than
@@ -117,6 +214,8 @@ export interface RankOptions {
    *  candidates are pushed down the trial order rather than removed, so the
    *  probe still reaches them if the ranking guessed wrong. */
   demote?: readonly HintKey[];
+  /** Also score groupText when name is set (createVisit name/window cells). */
+  scoreGroupText?: boolean;
   /** Handles that appeared in the most recent diff. Strong structural signal. */
   diffAdded?: readonly string[];
   /** Handle prefix bounding the region of interest. */
@@ -250,33 +349,74 @@ export function rankCandidates(
   const scored = pool.map((el, inputIndex) => {
     const signals: RankSignal[] = [];
     const lower = el.name.toLowerCase();
+    // Nameless contenteditables (hostile Prism): the adjacent label lives only
+    // in groupText ("Wave Name" vs "Window Start (day)"). Score groupText ONLY
+    // when name is blank so named field-placement controls (Question Text,
+    // Commit, palette tiles) are unaffected by window↔name demotion logic.
+    const groupLower = (el.groupText ?? '').toLowerCase();
+    const lexicalSurfaces: { label: string; text: string }[] = [
+      { label: 'name', text: lower },
+    ];
+    // Default: groupText only when nameless (field-placement safety).
+    // createVisit passes scoreGroupText so Wave Name still wins after the
+    // cell's accessible name becomes the visit title / day integer.
+    const useGroup =
+      !!groupLower.trim()
+      && groupLower.trim() !== lower.trim()
+      && (!lower.trim() || options.scoreGroupText === true);
+    if (useGroup) {
+      lexicalSurfaces.push({ label: 'groupText', text: groupLower });
+    }
 
-    const trimmed = lower.trim();
-    for (const word of hints) {
-      if (trimmed === word) {
-        signals.push({
-          name: 'lexical-exact',
-          weight: WEIGHT.lexicalExact,
-          detail: `name is exactly "${word}"`,
-        });
-        break;
+    // Count EVERY matching hint word, not just the first. A create control
+    // named "+ New Phase" answers visit_create on three cues (phase, new, +)
+    // where a nav tab named "Phases" answers on one; stopping at the first hit
+    // tied them and DOM order handed the binding to the inert tab, so live
+    // visit.create became a no-op and atVisitList stayed true on every screen.
+    const seenWords = new Set<string>();
+    let exactHit = false;
+    for (const surface of lexicalSurfaces) {
+      const trimmed = surface.text.trim();
+      for (const word of hints) {
+        if (trimmed === word) {
+          if (!seenWords.has(`exact:${word}`)) {
+            signals.push({
+              name: 'lexical-exact',
+              weight: WEIGHT.lexicalExact,
+              detail: `${surface.label} is exactly "${word}"`,
+            });
+            seenWords.add(`exact:${word}`);
+          }
+          exactHit = true;
+          continue;
+        }
+        if (surface.text.includes(word)) {
+          if (!seenWords.has(`lex:${word}`)) {
+            signals.push({
+              name: 'lexical',
+              weight: WEIGHT.lexical,
+              detail: `${surface.label} contains "${word}" (weak hint only)`,
+            });
+            seenWords.add(`lex:${word}`);
+          }
+        }
       }
-      if (lower.includes(word)) {
-        signals.push({
-          name: 'lexical',
-          weight: WEIGHT.lexical,
-          detail: `name contains "${word}" (weak hint only)`,
-        });
-        break;
-      }
+    }
+    // Exact already scored the whole name; do not also pile substring hits for
+    // the same control (e.g. name "save" matching commit's "save" twice).
+    if (exactHit) {
+      const kept = signals.filter((s) => s.name !== 'lexical');
+      signals.length = 0;
+      signals.push(...kept);
     }
 
     for (const decoyHint of options.demote ?? []) {
-      if (LEXICAL_HINTS[decoyHint].some((w) => lower.includes(w))) {
+      const hay = `${lower} ${groupLower}`;
+      if (LEXICAL_HINTS[decoyHint].some((w) => hay.includes(w))) {
         signals.push({
           name: 'decoy',
           weight: WEIGHT.demoted,
-          detail: `name matches the "${decoyHint}" list -- a known decoy for this question, tried last`,
+          detail: `name/groupText matches the "${decoyHint}" list -- a known decoy for this question, tried last`,
         });
         break;
       }

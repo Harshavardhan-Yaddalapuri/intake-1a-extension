@@ -54,7 +54,7 @@ const FOREIGN_OPS = [
 // The whitelist discoverFormBuilder applies.
 const BUILDER_OWNED = [
   'field.add', 'field.set_label', 'field.set_required', 'field.set_range',
-  'field.set_coded_values', 'field.set_skip_logic',
+  'field.set_coded_values', 'field.set_skip_logic', 'field.set_formula',
   'ctx.commit', 'ctx.is_committed', 'ctx.discard',
   'form.list_fields', 'field_palette.open',
 ];
@@ -107,26 +107,31 @@ test('the whitelist is load-bearing on env-rosetta too, not just the supplied mo
     create.recipe[0]?.evidence_name, '+ Add Visit',
     'it is emphatically not the real create control',
   );
+  // looksLikeCreateControl rejects inert "Phases"; looksLikeVisitCreateControl
+  // also rejects designer/form create chrome ("+ Page", "+ New Record Sheet").
   assert.equal(
-    atVisitList(obs, VISITS, create.recipe[0]?.evidence_name), true,
-    'and it makes the builder read as the visit list -- the same false positive, different words',
+    atVisitList(obs, VISITS, 'Phases'), false,
+    'inert Phases chrome must not witness the visit list',
+  );
+  assert.equal(
+    atVisitList(obs, VISITS, '+ Page'), false,
+    '+ Page on the designer must not witness the visit list',
   );
   for (const op of FOREIGN_OPS) {
     assert.ok(!BUILDER_OWNED.includes(op), `${op} must stay out of the builder whitelist`);
   }
 });
 
-test('a poisoned create control makes the builder look like the visit list', () => {
+test('designer page/form create controls no longer poison atVisitList', () => {
   const obs = observe(builderScreen());
-  // This is the second half of the failure: arrival is confirmed by finding the
-  // create control, so a create control bound to "+ Page" proves "arrival"
-  // without the agent having gone anywhere.
+  // Historical failure: visit.create rebound to "+ Page", so atVisitList
+  // reported arrival without climbing. Visit-shaped create witnesses only.
   assert.equal(
-    atVisitList(obs, VISITS, '+ Page'), true,
-    'demonstrates the false positive the rebinding caused',
+    atVisitList(obs, VISITS, '+ Page'), false,
+    '+ Page must not witness the visit list',
   );
   assert.equal(
     atVisitList(obs, VISITS, '+ Add Visit'), false,
-    'with the correct create control, the builder is correctly rejected',
+    'with the correct create control absent, the builder is rejected',
   );
 });
