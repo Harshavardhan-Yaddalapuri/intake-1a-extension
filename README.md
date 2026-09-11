@@ -189,7 +189,7 @@ Proven against Mock A + v14 hostile live runs (`d220d9d`). Zero-ARIA remains the
 | Explicit save / commit | Pass | Pass; wizard `Done` treated as decoy not commit |
 | Decoy buttons | Partially handled | Improved (commit ranking ignores bare Done) |
 | Read-back verify | Yes | Yes when UI reachable |
-| Idempotency (check-before-create) | Designed in engine/verify; re-record second Mock A if graders want proof | Depends on enumerate |
+| Idempotency (check-before-create) | Designed in engine/verify; second Mock A pass not re-recorded in this package | Depends on enumerate |
 | Human gate / traceability | Yes | Yes |
 | No `__readState` in agent build path | Yes | Yes |
 
