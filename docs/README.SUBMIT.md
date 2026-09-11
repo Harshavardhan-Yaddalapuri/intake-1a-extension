@@ -89,7 +89,8 @@ npm test               # node --test
 2. Serve the assignment eSource mock (the take-home folder with `esource-mock`) locally, e.g. Vite on `http://127.0.0.1:5173`, or any static server for that app.
 3. Open the mock in a tab. Click the extension icon → open the **side panel**.
 4. Pre-Flight → upload `abc-101-study.ir.json` (from the take-home `data/` folder, also referenced from docs artifacts).
-5. Optional: side panel → OpenRouter API key for Rung 2 (stored only in `chrome.storage.local`, never bundled).
+5. Optional: open the side panel and paste an OpenRouter key if you want Rung 2
+   (saved in local Chrome storage only).
 6. Start build → review capability report → **Resume**. Use Queue for escalations.
 
 Hostile generalization mocks (optional): see `generalization/RUNBOOK.md` (ports 4091–4094).
@@ -234,8 +235,8 @@ zero form-domain knowledge, zero LLM calls.
   end-to-end; scores in `docs/generalization-runs/*-after-v14-score.json`.
 - **Unit tests:** `npm test` (perceive / bind / verify / wizard / nav-gate /
   skip-formula suites).
-- **Screen recording:** not checked into the repo — attach a 2–3 minute
-  unedited Mock A run (side panel + gate visible) with the submission.
+- **Screen recording:** I am submitting a separate 2–3 minute unedited
+  Mock A run that shows the side panel and human gate (not stored in git).
 
 ## Where it breaks (and what it does)
 
@@ -284,4 +285,6 @@ cards cuts a lot of waiting.
 | OpenRouter (optional Rung 2) | Available for unbound type ranking via side-panel key | Not required for v14 board; free-model churn |
 | Unit tests (`node:test` + jsdom) | Locked nav-gate, Done-decoy, skip/formula regressions | jsdom ≠ live cursor/CSS — hostile gaps still need Chrome |
 
-No API keys are bundled. Do not commit `.env` / `.openrouter_key`.
+I do not ship API keys in the repo. Rung 2 is optional: paste an
+OpenRouter key in the side panel if you want it; it stays in local Chrome
+storage only.
